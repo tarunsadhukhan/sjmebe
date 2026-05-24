@@ -1,0 +1,31 @@
+[project]
+name = "VOWERP3BE"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "bcrypt==3.2.0",
+    "cryptography>=44.0.3",
+    "dotenv>=0.9.9",
+    "fastapi>=0.115.11",
+    "passlib>=1.7.4",
+    "pyjwt>=2.10.1",
+    "pymysql>=1.1.1",
+    "pyodbc>=5.3.0",
+    "pytest>=9.0.2",
+    "python-dotenv>=1.0.1",
+    "python-multipart>=0.0.20",
+    "sqlalchemy>=2.0.38",
+    "sqlmodel>=0.0.24",
+    "starlette>=0.46.1",
+    "uvicorn>=0.34.0",
+]
+
+[tool.uv.sources]
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta" 
