@@ -236,6 +236,51 @@ class SpinningRunningHoursEffResponse(BaseModel):
 
 
 # =============================================================================
+# Spinning Employee/Frame Break-up Efficiency Report (flat detail)
+# =============================================================================
+
+
+class SpinningEmpBrkParams(BaseModel):
+    """Query params for the spinning emp/frame break-up report endpoint."""
+    branch_id: int = Field(..., gt=0)
+    from_date: date
+    to_date: date
+    shift_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _check_range(self) -> "SpinningEmpBrkParams":
+        if self.from_date > self.to_date:
+            raise ValueError("from_date must be <= to_date")
+        return self
+
+
+class SpinningEmpBrkRow(BaseModel):
+    report_date: str
+    spell_id: Optional[int] = None
+    shift_name: Optional[str] = None
+    emp_code: Optional[str] = None
+    emp_name: Optional[str] = None
+    frame_no: Optional[str] = None
+    count: Optional[float] = None
+    power_min: Optional[float] = 0.0
+    loss_d: Optional[float] = 0.0
+    loss_m: Optional[float] = 0.0
+    loss_e: Optional[float] = 0.0
+    loss_i: Optional[float] = 0.0
+    total_loss: Optional[float] = 0.0
+    actual_run: Optional[float] = 0.0
+    machine_doff: Optional[float] = 0.0
+    doff_wt: Optional[float] = 0.0
+    rpm: Optional[float] = 0.0
+    eff_100: Optional[float] = 0.0
+    actual_eff: Optional[float] = 0.0
+
+
+class SpinningEmpBrkResponse(BaseModel):
+    data: List[SpinningEmpBrkRow]
+
+
+# =============================================================================
 # Winding Reports
 # =============================================================================
 

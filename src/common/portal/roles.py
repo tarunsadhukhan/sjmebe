@@ -429,3 +429,205 @@ async def edit_role_portal(
             detail=f"Internal server error: {str(e)}"
         )
 
+
+# =====================================================================
+# App Role <-> Menu mapping (tables: roles_mst, menus, role_app_menu_map)
+# Real columns (verified against tenant DB):
+#   roles_mst(role_id, role_name, active, updated_by_con_user, updated_date_time)
+#   menus(id, menu_key, menu_name, parent_id, menu_order, icon, is_group, is_active)
+#   role_app_menu_map(role_menu_mapping_id, role_id, menu_id, access_type_id, updated_by)
+#     -> role_app_menu_map.menu_id references menus.id
+# Frontend uses menu_id/menu_parent_id field names, so id/parent_id are aliased.
+# =====================================================================
+
+class AppMenuAccess(BaseModel):
+    menuId: int
+    accessTypeId: str
+
+
+class CreateRoleAppRequest(BaseModel):
+    roleName: str
+    menuAccessList: List[AppMenuAccess] = []
+
+
+class EditRoleAppRequest(BaseModel):
+    roleId: int
+    menuAccessList: List[AppMenuAccess] = []
+
+
+@router.get("/get_roles_app")
+async def get_roles_app(
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1),
+    search: Optional[str] = None,
+    _: dict = Depends(get_portal_optional_token_payload),
+    tenant_session: Session = Depends(get_tenant_db),
+):
+    offset = (page - 1) * limit
+    try:
+        rows = tenant_session.execute(
+            text("""
+                SELECT role_id, role_name, active
+                FROM roles_mst
+                WHERE (:search IS NULL OR role_name LIKE :search)
+                ORDER BY role_id
+                LIMIT :limit OFFSET :offset
+            """),
+            {"limit": limit, "offset": offset, "search": f"%{search}%" if search else None},
+        ).fetchall()
+        total = tenant_session.execute(
+            text("""
+                SELECT COUNT(*) FROM roles_mst
+                WHERE (:search IS NULL OR role_name LIKE :search)
+            """),
+            {"search": f"%{search}%" if search else None},
+        ).scalar()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query execution error: {str(e)}")
+
+    roles = [dict(r._mapping) for r in rows]
+    return {"data": roles, "total": total or 0}
+
+
+@router.get("/app_menu_full")
+async def get_app_menu_full(
+    _: dict = Depends(get_portal_optional_token_payload),
+    tenant_session: Session = Depends(get_tenant_db),
+):
+    try:
+        result = tenant_session.execute(
+            text("""
+                SELECT id AS menu_id, menu_name, parent_id AS menu_parent_id, is_group
+                FROM menus
+                WHERE is_active = 1
+                ORDER BY menu_order
+            """)
+        ).fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query execution error: {str(e)}")
+    menus = [dict(row._mapping) for row in result]
+    return {"data": menus}
+
+
+@router.get("/app_menu_by_roleid/{role_id}")
+async def get_app_menu_by_roleid(
+    role_id: int = Path(..., description="Role ID to filter menus"),
+    _: dict = Depends(get_portal_optional_token_payload),
+    tenant_session: Session = Depends(get_tenant_db),
+):
+    try:
+        menu_result = tenant_session.execute(
+            text("""
+                SELECT m.id AS menu_id, m.menu_name, m.parent_id AS menu_parent_id, m.is_group,
+                       ram.role_id, ram.access_type_id
+                FROM menus m
+                LEFT JOIN role_app_menu_map ram
+                  ON ram.menu_id = m.id AND ram.role_id = :role_id
+                WHERE m.is_active = 1
+                ORDER BY m.menu_order
+            """).bindparams(role_id=role_id)
+        ).fetchall()
+        role_result = tenant_session.execute(
+            text("SELECT role_name FROM roles_mst WHERE role_id = :role_id").bindparams(role_id=role_id)
+        ).fetchone()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query execution error: {str(e)}")
+
+    menus = [dict(row._mapping) for row in menu_result]
+    role_name = role_result[0] if role_result else None
+    return {"data": menus, "roleName": role_name}
+
+
+@router.post("/create_role_app")
+async def create_role_app(
+    role_data: CreateRoleAppRequest,
+    token_data: dict = Depends(get_portal_optional_token_payload),
+    tenant_session: Session = Depends(get_tenant_db),
+):
+    user_id = token_data.get("user_id") or 1
+    try:
+        ins = tenant_session.execute(
+            text("INSERT INTO roles_mst (role_name, active, updated_by_con_user) VALUES (:name, 1, :uid)"),
+            {"name": role_data.roleName.strip(), "uid": user_id},
+        )
+        role_id = ins.lastrowid
+
+        for menu_access in role_data.menuAccessList:
+            tenant_session.execute(
+                text("""
+                    INSERT INTO role_app_menu_map (role_id, menu_id, access_type_id, updated_by)
+                    VALUES (:role_id, :menu_id, :access_type_id, :updated_by)
+                """),
+                {
+                    "role_id": role_id,
+                    "menu_id": menu_access.menuId,
+                    "access_type_id": int(menu_access.accessTypeId),
+                    "updated_by": user_id,
+                },
+            )
+        tenant_session.commit()
+        return {
+            "status": "success",
+            "message": "Role and menu mappings created successfully",
+            "data": {
+                "role_id": role_id,
+                "role_name": role_data.roleName,
+                "mapped_menu_count": len(role_data.menuAccessList),
+            },
+        }
+    except Exception as e:
+        tenant_session.rollback()
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to create role: {str(e)}")
+
+
+@router.put("/edit_role_app")
+async def edit_role_app(
+    role_data: EditRoleAppRequest,
+    token_data: dict = Depends(get_portal_optional_token_payload),
+    tenant_session: Session = Depends(get_tenant_db),
+):
+    user_id = token_data.get("user_id") or 1
+    try:
+        role = tenant_session.execute(
+            text("SELECT role_name FROM roles_mst WHERE role_id = :role_id").bindparams(role_id=role_data.roleId)
+        ).fetchone()
+        if not role:
+            raise HTTPException(status_code=404, detail=f"Role with ID {role_data.roleId} not found")
+
+        tenant_session.execute(
+            text("DELETE FROM role_app_menu_map WHERE role_id = :role_id"),
+            {"role_id": role_data.roleId},
+        )
+        for menu_access in role_data.menuAccessList:
+            tenant_session.execute(
+                text("""
+                    INSERT INTO role_app_menu_map (role_id, menu_id, access_type_id, updated_by)
+                    VALUES (:role_id, :menu_id, :access_type_id, :updated_by)
+                """),
+                {
+                    "role_id": role_data.roleId,
+                    "menu_id": menu_access.menuId,
+                    "access_type_id": int(menu_access.accessTypeId),
+                    "updated_by": user_id,
+                },
+            )
+        tenant_session.commit()
+        return {
+            "status": "success",
+            "message": "Role menu mappings updated successfully",
+            "data": {
+                "role_id": role_data.roleId,
+                "role_name": role[0],
+                "mapped_menu_count": len(role_data.menuAccessList),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        tenant_session.rollback()
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update role menu mappings: {str(e)}")
+

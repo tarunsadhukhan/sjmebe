@@ -48,7 +48,7 @@ async def compmenuitems(
                 'icon': main.con_menu_icon,
                 'submenu': submenu_items if submenu_items else None,
             })
-
+            print(f"Processed main menu: {main.con_menu_name} with {(submenu_items)} submenus")
     return {
         "data": menu_data
     }
@@ -92,7 +92,7 @@ async def compmenuitems(
                 ORDER BY order_by
             """)
             
-            print(f"🔍 Executing query for user_id: {query} {user_id}")
+            print(f"🔍 Executing query for user_id: {query} userid= {user_id}")
             result = session.execute(query, {"user_id": user_id})
             menu_items = result.fetchall()
             print(f"📋 Retrieved {(menu_items)} menu itemjjs")

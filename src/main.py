@@ -39,6 +39,7 @@ from src.masters.castFactor import router as costFactor_router
 from src.masters.juteQuality import router as jute_quality_router
 from src.masters.juteSupplier import router as jute_supplier_router
 from src.masters.juteSupplierMap import router as jute_supplier_map_router
+from src.masters.juteMukamMaster import router as jute_mukam_router
 from src.masters.yarnQuality import router as yarn_quality_router
 from src.masters.machineSpgDetails import router as machine_spg_details_router
 from src.masters.spinningQuality import router as spinning_quality_router
@@ -64,6 +65,7 @@ from src.juteProcurement.reports import router as jute_reports_router
 from src.juteProduction.reports import router as spreader_reports_router
 from src.juteProduction.drawingReports import router as drawing_reports_router
 from src.juteProduction.spinningReports import router as spinning_reports_router
+from src.juteProduction.spinningEmpBrkReports import router as spinning_emp_brk_reports_router
 from src.juteProduction.windingReports import router as winding_reports_router
 from src.juteProduction.otherReports import router as other_reports_router
 from src.juteProduction.balesReports import router as bales_reports_router
@@ -143,6 +145,7 @@ app.include_router(costFactor_router, prefix="/api/costFactorMaster", tags=["mas
 app.include_router(jute_quality_router, prefix="/api/juteQualityMaster", tags=["masters-jute-quality"])
 app.include_router(jute_supplier_router, prefix="/api/juteSupplierMaster", tags=["masters-jute-supplier"])
 app.include_router(jute_supplier_map_router, prefix="/api/juteSupplierMap", tags=["masters-jute-supplier-map"])
+app.include_router(jute_mukam_router, prefix="/api/juteMukamMaster", tags=["masters-jute-mukam"])
 app.include_router(yarn_quality_router, prefix="/api/yarnQualityMaster", tags=["masters-yarn-quality"])
 app.include_router(machine_spg_details_router, prefix="/api/machineSpgDetailsMaster", tags=["masters-machine-spg-details"])
 app.include_router(spinning_quality_router, prefix="/api/spinningQualityMaster", tags=["masters-spinning-quality"])
@@ -180,6 +183,7 @@ app.include_router(jute_reports_router, prefix="/api/juteReports", tags=["jute-p
 app.include_router(spreader_reports_router, prefix="/api/spreaderReports", tags=["jute-production-spreader-reports"])
 app.include_router(drawing_reports_router, prefix="/api/drawingReports", tags=["jute-production-drawing-reports"])
 app.include_router(spinning_reports_router, prefix="/api/spinningReports", tags=["jute-production-spinning-reports"])
+app.include_router(spinning_emp_brk_reports_router, prefix="/api/spinningEmpBrkReports", tags=["jute-production-spinning-emp-brk-reports"])
 app.include_router(winding_reports_router, prefix="/api/windingReports", tags=["jute-production-winding-reports"])
 app.include_router(other_reports_router, prefix="/api/otherReports", tags=["jute-production-other-reports"])
 app.include_router(bales_reports_router, prefix="/api/balesReports", tags=["jute-production-bales-reports"])
