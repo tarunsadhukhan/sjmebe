@@ -161,10 +161,13 @@ def get_jute_po_by_id_query():
             {po_num_expr} AS po_num,
             jp.po_date,
             jp.party_id,
-            pm.party_id,
             pm.supp_name AS supplier_name,
             jp.supplier_id,
-            jsm.supplier_name AS broker_name,
+            jsm.supplier_name AS jute_supplier_name,
+            jp.broker_id,
+            bpm.supp_name AS broker_name,
+            jp.pay_to_id,
+            ppm.supp_name AS pay_to_name,
             jp.jute_mukam_id AS mukam_id,
             jmm.mukam_name AS mukam,
             jp.vehicle_type_id,
@@ -197,6 +200,8 @@ def get_jute_po_by_id_query():
         LEFT JOIN jute_lorry_mst jlm ON jlm.jute_lorry_type_id = jp.vehicle_type_id
         LEFT JOIN jute_supplier_mst jsm ON jsm.supplier_id = jp.supplier_id
         LEFT JOIN party_mst pm ON pm.party_id = jp.party_id
+        LEFT JOIN party_mst bpm ON bpm.party_id = jp.broker_id
+        LEFT JOIN party_mst ppm ON ppm.party_id = jp.pay_to_id
         LEFT JOIN jute_mukam_mst jmm ON jmm.mukam_id = jp.jute_mukam_id
         LEFT JOIN status_mst sm ON sm.status_id = jp.status_id
         WHERE jp.jute_po_id = :jute_po_id AND bm.co_id = :co_id
@@ -376,6 +381,23 @@ def get_parties_by_supplier_query():
         JOIN jute_supp_party_map jspm
             ON jspm.party_id = pm.party_id
         WHERE jspm.jute_supplier_id = :supplier_id
+        ORDER BY pm.supp_name
+    """
+    return text(sql)
+
+
+def get_brokers_query():
+    """
+    Query to get brokers for the Jute PO header (Broker Name dropdown).
+    Brokers are parties from party_mst scoped to the company.
+    """
+    sql = """
+        SELECT
+            pm.party_id AS broker_id,
+            pm.supp_name AS broker_name
+        FROM party_mst pm
+        WHERE (pm.co_id = :co_id OR pm.co_id IS NULL)
+          AND (pm.active = 1 OR pm.active IS NULL)
         ORDER BY pm.supp_name
     """
     return text(sql)

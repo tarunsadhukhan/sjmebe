@@ -528,6 +528,10 @@ class JutePo(Base):
     branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     supplier_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     party_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    # Broker references party_mst.party_id (parties acting as brokers)
+    broker_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    # Pay To references party_mst.party_id (party to be paid)
+    pay_to_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     jute_mukam_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     jute_indent_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
 
