@@ -1,7 +1,7 @@
 """
 Tests for MR weight rounding logic.
-Verifies that shortage_kgs and accepted_weight are rounded to 0 decimals (integers),
-matching the frontend Math.round() behavior.
+Verifies that actual_weight, shortage_kgs and accepted_weight are rounded to
+2 decimals, matching the frontend round2() behavior in mr.py update_mr.
 """
 import pytest
 
@@ -11,27 +11,27 @@ def calculate_shortage_and_accepted(
     allowable_moisture: float | None,
     actual_moisture: float,
     claim_dust: float,
-) -> tuple[int, int]:
+) -> tuple[float, float]:
     """Mirror of the backend rounding logic in mr.py update_mr."""
     if actual_weight <= 0:
-        return 0, 0
+        return 0.0, 0.0
 
-    rounded_weight = round(actual_weight)
+    weight = round(actual_weight, 2)
     moisture_diff = 0.0
     if allowable_moisture is not None and actual_moisture > allowable_moisture:
         moisture_diff = actual_moisture - allowable_moisture
 
     deduction_percentage = moisture_diff + claim_dust
     if deduction_percentage <= 0:
-        return 0, rounded_weight
+        return 0.0, weight
 
-    shortage_kgs = round(rounded_weight * deduction_percentage / 100.0)
-    accepted_weight = max(0, rounded_weight - int(shortage_kgs))
-    return int(shortage_kgs), int(accepted_weight)
+    shortage_kgs = round(weight * deduction_percentage / 100.0, 2)
+    accepted_weight = round(max(0.0, weight - shortage_kgs), 2)
+    return shortage_kgs, accepted_weight
 
 
 class TestMRWeightRounding:
-    """Tests for MR weight rounding to 0 decimals."""
+    """Tests for MR weight rounding to 2 decimals."""
 
     def test_zero_weight_returns_zeros(self):
         shortage, accepted = calculate_shortage_and_accepted(0, 10, 12, 0)
@@ -53,39 +53,43 @@ class TestMRWeightRounding:
         assert shortage == 0
         assert accepted == 500
 
-    def test_returns_integers(self):
+    def test_returns_floats(self):
         shortage, accepted = calculate_shortage_and_accepted(1000, 10, 16.67, 2)
-        assert isinstance(shortage, int)
-        assert isinstance(accepted, int)
+        assert isinstance(shortage, float)
+        assert isinstance(accepted, float)
+        # deduction = 8.67% -> shortage = round2(86.7) = 86.7, accepted = 913.3
+        assert shortage == pytest.approx(86.7)
+        assert accepted == pytest.approx(913.3)
 
     def test_correct_calculation_8_percent(self):
         # 1000 kg, moisture diff = 6%, dust = 2%, total = 8%
-        # shortage = round(1000 * 8 / 100) = 80
-        # accepted = 1000 - 80 = 920
+        # shortage = round2(1000 * 8 / 100) = 80, accepted = 1000 - 80 = 920
         shortage, accepted = calculate_shortage_and_accepted(1000, 10, 16, 2)
         assert shortage == 80
         assert accepted == 920
 
     def test_shortage_plus_accepted_equals_actual(self):
-        """shortage + accepted should always equal rounded actual weight."""
+        """shortage + accepted should always equal the actual weight (2 dp)."""
         shortage, accepted = calculate_shortage_and_accepted(1000, 10, 16, 2)
-        assert shortage + accepted == 1000
+        assert shortage + accepted == pytest.approx(1000)
 
-    def test_fractional_weight_rounds_first(self):
-        # 999.6 rounds to 1000, then 8% deduction
+    def test_fractional_weight_keeps_2dp(self):
+        # 999.6 kg, deduction 8% -> shortage = round2(79.968) = 79.97
+        # accepted = round2(999.6 - 79.97) = 919.63
         shortage, accepted = calculate_shortage_and_accepted(999.6, 10, 16, 2)
-        assert shortage + accepted == 1000
+        assert shortage == pytest.approx(79.97)
+        assert accepted == pytest.approx(919.63)
+        assert shortage + accepted == pytest.approx(999.6)
 
     def test_dust_only_deduction(self):
         # No moisture diff, but claimDust = 5%
-        # shortage = round(1000 * 5 / 100) = 50
+        # shortage = round2(1000 * 5 / 100) = 50
         shortage, accepted = calculate_shortage_and_accepted(1000, 10, 8, 5)
         assert shortage == 50
         assert accepted == 950
 
     def test_allowable_moisture_none(self):
-        # allowable_moisture is None → moisture_diff = 0
-        # Only dust = 3% applies
+        # allowable_moisture is None -> moisture_diff = 0, only dust = 3% applies
         shortage, accepted = calculate_shortage_and_accepted(1000, None, 20, 3)
         assert shortage == 30
         assert accepted == 970
@@ -99,34 +103,28 @@ class TestMRWeightRounding:
         (333, 10, 12, 1),       # fractional shortage
         (7777, 5, 22, 3.5),     # large deduction
     ])
-    def test_always_returns_integers(self, weight, moisture_allow, moisture_actual, dust):
+    def test_always_returns_2dp_that_sum_to_weight(self, weight, moisture_allow, moisture_actual, dust):
         shortage, accepted = calculate_shortage_and_accepted(
             weight, moisture_allow, moisture_actual, dust
         )
-        assert isinstance(shortage, int), f"shortage_kgs not int: {shortage}"
-        assert isinstance(accepted, int), f"accepted_weight not int: {accepted}"
-        rounded_weight = round(weight)
+        assert isinstance(shortage, float), f"shortage_kgs not float: {shortage}"
+        assert isinstance(accepted, float), f"accepted_weight not float: {accepted}"
+        # values carry at most 2 decimals
+        assert round(shortage, 2) == shortage
+        assert round(accepted, 2) == accepted
+        rounded_weight = round(weight, 2)
         if shortage > 0:
-            assert shortage + accepted == rounded_weight, (
-                f"shortage({shortage}) + accepted({accepted}) != rounded({rounded_weight})"
+            assert shortage + accepted == pytest.approx(rounded_weight), (
+                f"shortage({shortage}) + accepted({accepted}) != weight({rounded_weight})"
             )
-
-    def test_python_round_matches_js_math_round_common_cases(self):
-        """Verify Python round() matches JS Math.round() for common values.
-        Note: Python uses banker's rounding for exact .5, but this rarely
-        occurs in real weight calculations."""
-        assert round(80.4) == 80   # JS: 80
-        assert round(80.6) == 81   # JS: 81
-        assert round(80.51) == 81  # JS: 81
-        assert round(80.49) == 80  # JS: 80
 
     def test_large_weight_with_small_deduction(self):
         # 50000 kg, moisture diff = 0.5%, dust = 0.3%, total = 0.8%
-        # shortage = round(50000 * 0.8 / 100) = round(400) = 400
+        # shortage = round2(50000 * 0.8 / 100) = 400
         shortage, accepted = calculate_shortage_and_accepted(50000, 10, 10.5, 0.3)
         assert shortage == 400
         assert accepted == 49600
-        assert shortage + accepted == 50000
+        assert shortage + accepted == pytest.approx(50000)
 
     def test_100_percent_deduction(self):
         # Edge case: 100% deduction (extreme moisture + dust)

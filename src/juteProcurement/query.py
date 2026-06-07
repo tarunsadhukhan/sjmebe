@@ -191,6 +191,7 @@ def get_jute_po_by_id_query():
             jp.contract_date,
             jp.brokrage_rate,
             jp.brokrage_percentage,
+            jp.dalta_pc,
             jp.penalty,
             jp.internal_note,
             jp.updated_date_time
@@ -762,6 +763,31 @@ def get_open_jute_pos_query():
         LEFT JOIN jute_mukam_mst jmm ON jmm.mukam_id = jp.jute_mukam_id
         WHERE bm.co_id = :co_id
         AND jp.status_id = 3
+        ORDER BY jp.po_date DESC, jp.jute_po_id DESC
+    """
+    return text(sql)
+
+
+def get_open_jute_pos_by_supplier_query(include_party: bool = False):
+    """
+    Approved (status_id = 3) Jute POs for a given supplier, used for the PO
+    dropdown on the MR edit page. Optionally also filtered by party_id.
+    """
+    po_num_expr = get_jute_po_number_sql_expression()
+    party_filter = "AND jp.party_id = :party_id" if include_party else ""
+
+    sql = f"""
+        SELECT
+            jp.jute_po_id,
+            {po_num_expr} AS po_num,
+            jp.po_date
+        FROM jute_po jp
+        INNER JOIN branch_mst bm ON bm.branch_id = jp.branch_id
+        INNER JOIN co_mst cm ON cm.co_id = bm.co_id
+        WHERE bm.co_id = :co_id
+        AND jp.status_id = 3
+        AND jp.supplier_id = :supplier_id
+        {party_filter}
         ORDER BY jp.po_date DESC, jp.jute_po_id DESC
     """
     return text(sql)

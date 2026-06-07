@@ -2499,6 +2499,50 @@ _ETRACK_PROC_UPDATE_SQL = text(
     """
 )
 
+# Pre-step (Etrack Process): back-fill emp_code on bio_attendance_table from the
+# link master by matching the device bio id. tbl_master_bio_link_mst holds
+# bio_dev_id (the device-side bio id) and master_data (the master emp_code) for
+# match_type='E'. Overwrites emp_code for every matching row so the subsequent
+# emp_code -> eb_id resolution works off the corrected codes.
+_ETRACK_PROC_EMPCODE_UPDATE_SQL = text(
+    """
+    UPDATE bio_attendance_table b
+    JOIN tbl_master_bio_link_mst m
+        ON m.match_type = 'E'
+       AND m.bio_dev_id = b.bio_id
+       SET b.emp_code = m.master_data
+    """
+)
+
+# Pre-step (Etrack Process): fill a blank bio_att_log_id with a generated local
+# sequence. Base = 500000 when the table max is below 500000, otherwise
+# max + 1; each blank row (NULL or 0) then takes the next sequential id in
+# bio_att_id order. @ba_seq is initialised on the same connection just before.
+_ETRACK_PROC_LOGID_INIT_SQL = text("SET @ba_seq := :base - 1")
+
+_ETRACK_PROC_LOGID_FILL_SQL = text(
+    """
+    UPDATE bio_attendance_table
+       SET bio_att_log_id = (@ba_seq := @ba_seq + 1)
+     WHERE bio_att_log_id IS NULL OR bio_att_log_id = 0
+     ORDER BY bio_att_id
+    """
+)
+
+# Pre-step (Etrack Process): set device_id from the punch direction.
+# 'in' -> 22, anything else (out/blank) -> 14. Compared case-insensitively
+# since device_direction is stored lowercase ('in'/'out') but may arrive
+# capitalised from the device feed.
+_ETRACK_PROC_DEVICE_ID_SQL = text(
+    """
+    UPDATE bio_attendance_table
+       SET device_id = CASE
+           WHEN LOWER(TRIM(device_direction)) = 'in' THEN 22
+           ELSE 14
+       END
+    """
+)
+
 # ---------------------------------------------------------------------------
 # Resolve dept_id / desig_id for rows that already have eb_id set but are
 # still missing dept_id or desig_id.
@@ -3553,6 +3597,140 @@ async def bio_att_b_atten(
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
+def _parse_etrack_proc_params(body: dict, qp) -> tuple[str, int]:
+    """Validate tran_date (YYYY-MM-DD) and branch_id shared by the Etrack
+    Process endpoints. Raises HTTPException on bad input."""
+    tran_date_raw = body.get("tran_date") or qp.get("tran_date")
+    if not tran_date_raw:
+        raise HTTPException(status_code=400, detail="tran_date is required")
+    try:
+        datetime.strptime(tran_date_raw, "%Y-%m-%d")
+        tran_date = tran_date_raw
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid tran_date {tran_date_raw!r}, expected YYYY-MM-DD",
+        )
+
+    branch_id_raw = body.get("branch_id") or qp.get("branch_id")
+    if branch_id_raw in (None, ""):
+        raise HTTPException(status_code=400, detail="branch_id is required")
+    try:
+        branch_id = int(branch_id_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="branch_id must be an integer")
+    return tran_date, branch_id
+
+
+def _etrack_resolve_and_process(db: Session, tran_date: str) -> dict:
+    """Shared Etrack Process core. Resolves eb_id / dept_id / desig_id for
+    bio_attendance rows where eb_id IS NULL (via tbl_master_bio_link_mst, then
+    last daily_attendance, then hrms_ed_official_details), then deletes and
+    rebuilds the daily_attendance_process_table spell rows for tran_date.
+
+    Returns {"resolve": {...}, "is_off_day": bool, "inserted": int}.
+    """
+    # ── Step 1: distinct emp_code -> eb_id from link master ─────────────
+    unresolved_rows = db.execute(_ETRACK_PROC_UNRESOLVED_SQL).fetchall()
+
+    resolve_result = {
+        "resolved": 0,
+        "updated": 0,
+        "from_daily_attendance": 0,
+        "fallback_official": 0,
+        "no_source": 0,
+    }
+
+    if unresolved_rows:
+        emp_eb_map: dict[str, int] = {
+            str(r.emp_code): int(r.eb_id)
+            for r in unresolved_rows
+            if r.eb_id is not None
+        }
+
+        if emp_eb_map:
+            unique_eb_ids = list(set(emp_eb_map.values()))
+
+            # ── Step 2: last daily_attendance per eb_id ──────────────────
+            da_rows = db.execute(
+                _ETRACK_PROC_LAST_DAILY_ATT_SQL,
+                {"eb_ids": tuple(unique_eb_ids)},
+            ).fetchall()
+            da_map: dict[int, tuple] = {
+                int(r.eb_id): (r.worked_department_id, r.worked_designation_id)
+                for r in da_rows
+                if r.worked_department_id is not None
+            }
+
+            # ── Step 3: fallback from hrms_ed_official_details ───────────
+            missing_eb_ids = [eid for eid in unique_eb_ids if eid not in da_map]
+            official_map: dict[int, tuple] = {}
+            if missing_eb_ids:
+                off_rows = db.execute(
+                    _ETRACK_PROC_OFFICIAL_SQL,
+                    {"eb_ids": tuple(missing_eb_ids)},
+                ).fetchall()
+                official_map = {
+                    int(r.eb_id): (r.dept_id, r.desig_id)
+                    for r in off_rows
+                }
+
+            # ── Step 4: UPDATE bio_attendance_table ──────────────────────
+            updated = 0
+            fallback_official = 0
+            no_source = 0
+
+            for emp_code, eb_id in emp_eb_map.items():
+                if eb_id in da_map:
+                    dept_id, desig_id = da_map[eb_id]
+                elif eb_id in official_map:
+                    dept_id, desig_id = official_map[eb_id]
+                    fallback_official += 1
+                else:
+                    no_source += 1
+                    continue
+
+                res = db.execute(
+                    _ETRACK_PROC_UPDATE_SQL,
+                    {
+                        "eb_id": eb_id,
+                        "dept_id": dept_id,
+                        "desig_id": desig_id,
+                        "emp_code": emp_code,
+                    },
+                )
+                updated += int(res.rowcount or 0)
+
+            db.commit()
+
+            resolve_result = {
+                "resolved": len(emp_eb_map),
+                "updated": updated,
+                "from_daily_attendance": len(da_map),
+                "fallback_official": fallback_official,
+                "no_source": no_source,
+            }
+
+    # ── Step 5: process into daily_attendance_process_table ─────────────
+    is_off_row = db.execute(IS_OFF_DAY_SQL, {"tran_date": tran_date}).fetchone()
+    is_off_day = bool(is_off_row and int(is_off_row.cnt) > 0)
+
+    # Delete existing rows for the date (re-run safe).
+    db.execute(DELETE_DAY_ROWS_SQL, {"tran_date": tran_date})
+    db.commit()
+
+    inserted = _process_etrack_day(
+        db, tran_date=tran_date, is_off_day=is_off_day,
+    )
+    db.commit()
+
+    return {
+        "resolve": resolve_result,
+        "is_off_day": is_off_day,
+        "inserted": inserted,
+    }
+
+
 @router.post("/bio_att_etrack_process")
 async def bio_att_etrack_process(
     request: Request,
@@ -3588,129 +3766,112 @@ async def bio_att_etrack_process(
             pass
         qp = request.query_params
 
-        # ── Validate required params ─────────────────────────────────────────
-        tran_date_raw = body.get("tran_date") or qp.get("tran_date")
-        if not tran_date_raw:
-            raise HTTPException(status_code=400, detail="tran_date is required")
-        try:
-            datetime.strptime(tran_date_raw, "%Y-%m-%d")
-            tran_date: str = tran_date_raw
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid tran_date {tran_date_raw!r}, expected YYYY-MM-DD",
-            )
+        tran_date, branch_id = _parse_etrack_proc_params(body, qp)
 
-        branch_id_raw = body.get("branch_id") or qp.get("branch_id")
-        if branch_id_raw in (None, ""):
-            raise HTTPException(status_code=400, detail="branch_id is required")
-        try:
-            branch_id = int(branch_id_raw)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="branch_id must be an integer")
-
-        # ── Step 1: distinct emp_code -> eb_id from link master ─────────────
-        unresolved_rows = db.execute(_ETRACK_PROC_UNRESOLVED_SQL).fetchall()
-
-        resolve_result = {
-            "resolved": 0,
-            "updated": 0,
-            "from_daily_attendance": 0,
-            "fallback_official": 0,
-            "no_source": 0,
-        }
-
-        if unresolved_rows:
-            emp_eb_map: dict[str, int] = {
-                str(r.emp_code): int(r.eb_id)
-                for r in unresolved_rows
-                if r.eb_id is not None
-            }
-
-            if emp_eb_map:
-                unique_eb_ids = list(set(emp_eb_map.values()))
-
-                # ── Step 2: last daily_attendance per eb_id ──────────────────
-                da_rows = db.execute(
-                    _ETRACK_PROC_LAST_DAILY_ATT_SQL,
-                    {"eb_ids": tuple(unique_eb_ids)},
-                ).fetchall()
-                da_map: dict[int, tuple] = {
-                    int(r.eb_id): (r.worked_department_id, r.worked_designation_id)
-                    for r in da_rows
-                    if r.worked_department_id is not None
-                }
-
-                # ── Step 3: fallback from hrms_ed_official_details ───────────
-                missing_eb_ids = [eid for eid in unique_eb_ids if eid not in da_map]
-                official_map: dict[int, tuple] = {}
-                if missing_eb_ids:
-                    off_rows = db.execute(
-                        _ETRACK_PROC_OFFICIAL_SQL,
-                        {"eb_ids": tuple(missing_eb_ids)},
-                    ).fetchall()
-                    official_map = {
-                        int(r.eb_id): (r.dept_id, r.desig_id)
-                        for r in off_rows
-                    }
-
-                # ── Step 4: UPDATE bio_attendance_table ──────────────────────
-                updated = 0
-                fallback_official = 0
-                no_source = 0
-
-                for emp_code, eb_id in emp_eb_map.items():
-                    if eb_id in da_map:
-                        dept_id, desig_id = da_map[eb_id]
-                    elif eb_id in official_map:
-                        dept_id, desig_id = official_map[eb_id]
-                        fallback_official += 1
-                    else:
-                        no_source += 1
-                        continue
-
-                    res = db.execute(
-                        _ETRACK_PROC_UPDATE_SQL,
-                        {
-                            "eb_id": eb_id,
-                            "dept_id": dept_id,
-                            "desig_id": desig_id,
-                            "emp_code": emp_code,
-                        },
-                    )
-                    updated += int(res.rowcount or 0)
-
-                db.commit()
-
-                resolve_result = {
-                    "resolved": len(emp_eb_map),
-                    "updated": updated,
-                    "from_daily_attendance": len(da_map),
-                    "fallback_official": fallback_official,
-                    "no_source": no_source,
-                }
-
-        # ── Step 5: process into daily_attendance_process_table ─────────────
-        is_off_row = db.execute(IS_OFF_DAY_SQL, {"tran_date": tran_date}).fetchone()
-        is_off_day = bool(is_off_row and int(is_off_row.cnt) > 0)
-
-        # Delete existing rows for the date (re-run safe).
-        db.execute(DELETE_DAY_ROWS_SQL, {"tran_date": tran_date})
-        db.commit()
-
-        inserted = _process_etrack_day(
-            db, tran_date=tran_date, is_off_day=is_off_day,
-        )
-        db.commit()
+        # Resolve eb_id / dept_id / desig_id, then build the day's spell rows.
+        core = _etrack_resolve_and_process(db, tran_date)
 
         return {
             "status": "ok",
             "tran_date": tran_date,
             "branch_id": branch_id,
-            "is_off_day": is_off_day,
-            "resolve": resolve_result,
+            "is_off_day": core["is_off_day"],
+            "resolve": core["resolve"],
             "process": {
-                "total_inserted": inserted,
+                "total_inserted": core["inserted"],
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@router.post("/bio_att_etrack_process_d")
+async def bio_att_etrack_process_d(
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    token_data: dict = Depends(get_current_user_with_refresh),
+):
+    """Etrack Process (D). Runs three pre-steps on bio_attendance_table, then
+    the same resolve + process as /bio_att_etrack_process:
+
+      0.  emp_code      <- tbl_master_bio_link_mst.master_data
+                            (match bio_id = bio_dev_id, match_type='E').
+      0b. bio_att_log_id <- generated 500000+ sequence where blank (NULL or 0).
+      0c. device_id      <- 22 when device_direction='in', else 14.
+
+    These pre-steps run only here, NOT in /bio_att_etrack_process.
+
+    Required body params:
+        tran_date  : YYYY-MM-DD
+        branch_id  : int
+    """
+    co_id = request.query_params.get("co_id")
+    if not co_id:
+        raise HTTPException(status_code=400, detail="co_id is required")
+
+    try:
+        body: dict = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+        qp = request.query_params
+
+        tran_date, branch_id = _parse_etrack_proc_params(body, qp)
+
+        # ── Step 0: back-fill emp_code from link master (bio_id -> emp_code) ─
+        # Match tbl_master_bio_link_mst.bio_dev_id against bio_attendance_table.bio_id
+        # (match_type='E') and set emp_code = master_data for every matching row,
+        # so the emp_code -> eb_id resolution below runs on corrected codes.
+        empcode_res = db.execute(_ETRACK_PROC_EMPCODE_UPDATE_SQL)
+        emp_code_updated = int(empcode_res.rowcount or 0)
+        db.commit()
+
+        # ── Step 0b: fill blank bio_att_log_id with a generated sequence ────
+        # Base = 500000 when the table max is below 500000, else max + 1.
+        # Computed in Python (can't read the same table in an UPDATE subquery),
+        # then a session variable assigns sequential ids to the blank rows.
+        logid_max_row = db.execute(
+            text("SELECT MAX(bio_att_log_id) AS max_id FROM bio_attendance_table")
+        ).mappings().first()
+        cur_max_log_id = (
+            int(logid_max_row["max_id"])
+            if logid_max_row and logid_max_row["max_id"] is not None
+            else 0
+        )
+        logid_base = 500000 if cur_max_log_id < 500000 else cur_max_log_id + 1
+        db.execute(_ETRACK_PROC_LOGID_INIT_SQL, {"base": logid_base})
+        logid_res = db.execute(_ETRACK_PROC_LOGID_FILL_SQL)
+        bio_att_log_id_filled = int(logid_res.rowcount or 0)
+        db.commit()
+
+        # ── Step 0c: set device_id from direction ('in'->22, else 14) ───────
+        device_id_res = db.execute(_ETRACK_PROC_DEVICE_ID_SQL)
+        device_id_updated = int(device_id_res.rowcount or 0)
+        db.commit()
+
+        # Resolve eb_id / dept_id / desig_id, then build the day's spell rows.
+        core = _etrack_resolve_and_process(db, tran_date)
+
+        return {
+            "status": "ok",
+            "tran_date": tran_date,
+            "branch_id": branch_id,
+            "is_off_day": core["is_off_day"],
+            "emp_code_updated": emp_code_updated,
+            "bio_att_log_id_filled": bio_att_log_id_filled,
+            "device_id_updated": device_id_updated,
+            "resolve": core["resolve"],
+            "process": {
+                "total_inserted": core["inserted"],
             },
         }
 

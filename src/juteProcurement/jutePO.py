@@ -473,6 +473,7 @@ class JutePOCreate(BaseModel):
     credit_term: Optional[int] = None
     delivery_timeline: Optional[int] = None
     freight_charge: Optional[float] = None
+    dalta_pc: Optional[float] = None
     remarks: Optional[str] = None
     line_items: List[JutePOLineItemCreate]
 
@@ -493,6 +494,7 @@ class JutePOUpdate(BaseModel):
     credit_term: Optional[int] = None
     delivery_timeline: Optional[int] = None
     freight_charge: Optional[float] = None
+    dalta_pc: Optional[float] = None
     remarks: Optional[str] = None
     line_items: Optional[List[JutePOLineItemCreate]] = None
 
@@ -579,6 +581,7 @@ async def jute_po_create(
             credit_term=payload.credit_term,
             delivery_days=payload.delivery_timeline,
             frieght_charge=payload.freight_charge,
+            dalta_pc=payload.dalta_pc,
             remarks=payload.remarks,
             weight=total_weight_qtl,
             jute_po_value=total_value,
@@ -710,6 +713,8 @@ async def jute_po_update(
             jute_po.delivery_days = payload.delivery_timeline
         if payload.freight_charge is not None:
             jute_po.frieght_charge = payload.freight_charge
+        if payload.dalta_pc is not None:
+            jute_po.dalta_pc = payload.dalta_pc
         if payload.remarks is not None:
             jute_po.remarks = payload.remarks
         

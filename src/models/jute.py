@@ -282,7 +282,7 @@ class JuteMrLi(Base):
     # Claims and adjustments
     claim_dust: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     claim_quality: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    shortage_kgs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=0)
+    shortage_kgs: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0)
 
     # Accepted and pricing
     accepted_weight: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -552,6 +552,8 @@ class JutePo(Base):
     frieght_charge: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     brokrage_rate: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     brokrage_percentage: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
+    # Less / deduction percentage on the PO ("Less (%)")
+    dalta_pc: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     penalty: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     # Vehicle details

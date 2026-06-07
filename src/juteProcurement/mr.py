@@ -23,6 +23,9 @@ from src.juteProcurement.query import (
     get_warehouse_options_query,
     get_mr_with_approval_info,
     update_mr_status,
+    get_open_jute_pos_by_supplier_query,
+    get_all_suppliers_query,
+    get_parties_by_supplier_query,
 )
 from src.common.approval_utils import process_approval, process_rejection
 from src.juteProcurement.formatters import (
@@ -50,7 +53,7 @@ class MRLineItemUpdate(BaseModel):
     allowable_moisture: Optional[float] = None
     actual_moisture: Optional[str] = None
     claim_dust: Optional[float] = None
-    shortage_kgs: Optional[int] = None
+    shortage_kgs: Optional[float] = None
     accepted_weight: Optional[float] = None
     rate: Optional[float] = None
     claim_rate: Optional[float] = None
@@ -64,7 +67,10 @@ class MRLineItemUpdate(BaseModel):
 class MRUpdateRequest(BaseModel):
     """Request model for updating MR header and line items."""
     mr_weight: Optional[float] = None
+    jute_supplier_id: Optional[int] = None
+    party_id: Optional[int] = None
     party_branch_id: Optional[int] = None
+    po_id: Optional[int] = None
     remarks: Optional[str] = None
     src_com_id: Optional[int] = None
     line_items: List[MRLineItemUpdate] = []
@@ -228,6 +234,97 @@ async def get_warehouse_options(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/get_open_pos/{supplier_id}")
+async def get_open_pos_for_mr(
+    supplier_id: int,
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    token_data: dict = Depends(get_current_user_with_refresh),
+):
+    """
+    Get approved (open) Jute POs for a supplier, used for the PO dropdown on the
+    MR edit page. Optionally filtered by party_id when provided.
+    """
+    try:
+        q_co_id = request.query_params.get("co_id")
+        if not q_co_id:
+            raise HTTPException(status_code=400, detail="co_id is required")
+        try:
+            co_id = int(q_co_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid co_id")
+
+        party_id = None
+        q_party_id = request.query_params.get("party_id")
+        if q_party_id not in (None, "", "null"):
+            try:
+                party_id = int(q_party_id)
+            except ValueError:
+                party_id = None
+
+        query = get_open_jute_pos_by_supplier_query(include_party=party_id is not None)
+        params = {"co_id": co_id, "supplier_id": supplier_id}
+        if party_id is not None:
+            params["party_id"] = party_id
+
+        result = db.execute(query, params).fetchall()
+        pos = [dict(r._mapping) for r in result]
+
+        return {"pos": pos}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching open POs for MR")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/get_suppliers")
+async def get_suppliers_for_mr(
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    token_data: dict = Depends(get_current_user_with_refresh),
+):
+    """Get all jute suppliers for the company, for the MR Supplier dropdown."""
+    try:
+        q_co_id = request.query_params.get("co_id")
+        if not q_co_id:
+            raise HTTPException(status_code=400, detail="co_id is required")
+        try:
+            co_id = int(q_co_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid co_id")
+
+        result = db.execute(get_all_suppliers_query(), {"co_id": co_id}).fetchall()
+        suppliers = [dict(r._mapping) for r in result]
+        return {"suppliers": suppliers}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching suppliers for MR")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/get_parties/{supplier_id}")
+async def get_parties_for_mr(
+    supplier_id: int,
+    db: Session = Depends(get_tenant_db),
+    token_data: dict = Depends(get_current_user_with_refresh),
+):
+    """Get parties mapped to a supplier, for the MR Party dropdown."""
+    try:
+        result = db.execute(get_parties_by_supplier_query(), {"supplier_id": supplier_id}).fetchall()
+        parties = [dict(r._mapping) for r in result]
+        return {"parties": parties}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching parties for MR")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/get_party_branches")
 async def get_party_branches(
     request: Request,
@@ -383,24 +480,23 @@ async def update_jute_mr(
             
             claim_dust = float(item.claim_dust) if item.claim_dust is not None else 0.0
             
-            # Calculate shortage_kgs first — all weights rounded to 0 decimals (whole kg)
+            # actual_weight, accepted_weight and shortage_kgs all carry 2 decimals.
             shortage_kgs = 0.0
-            rounded_weight = round(actual_weight)
-            accepted_weight = rounded_weight
-            
+            weight = round(actual_weight, 2)
+            accepted_weight = weight
+
             if actual_weight > 0:
                 moisture_diff = 0.0
                 if allowable_moisture is not None and actual_moisture > allowable_moisture:
                     moisture_diff = actual_moisture - allowable_moisture
-                
+
                 deduction_percentage = moisture_diff + claim_dust
                 if deduction_percentage > 0:
                     # Formula: shortage_kgs = actual_weight * (moisture diff % + claim_dust%)
-                    # Round to 0 decimals to match Integer column type
-                    shortage_kgs = round(rounded_weight * deduction_percentage / 100.0)
-                    # Formula: accepted_weight = actual_weight - shortage_kgs (both integers)
-                    accepted_weight = max(0, rounded_weight - int(shortage_kgs))
-                
+                    shortage_kgs = round(weight * deduction_percentage / 100.0, 2)
+                    # Formula: accepted_weight = actual_weight - shortage_kgs (2 dp)
+                    accepted_weight = round(max(0.0, weight - shortage_kgs), 2)
+
                 total_accepted_weight += accepted_weight
             
             # Update line item
@@ -437,8 +533,8 @@ async def update_jute_mr(
                 "allowable_moisture": item.allowable_moisture,
                 "actual_moisture": item.actual_moisture,
                 "claim_dust": item.claim_dust,
-                "shortage_kgs": int(round(shortage_kgs)),
-                "accepted_weight": int(round(accepted_weight)),
+                "shortage_kgs": round(float(shortage_kgs), 2),
+                "accepted_weight": round(float(accepted_weight), 2),
                 "rate": item.rate,
                 "claim_rate": item.claim_rate,
                 "claim_quality": item.claim_quality,
@@ -450,23 +546,29 @@ async def update_jute_mr(
             })
 
         # Update MR header with calculated weight
-        mr_weight = round(body.mr_weight) if body.mr_weight is not None else round(total_accepted_weight)
+        mr_weight = round(body.mr_weight, 2) if body.mr_weight is not None else round(total_accepted_weight, 2)
         
         update_header_query = text("""
             UPDATE jute_mr
             SET mr_weight = :mr_weight,
+                jute_supplier_id = COALESCE(:jute_supplier_id, jute_supplier_id),
+                party_id = COALESCE(:party_id, party_id),
                 party_branch_id = :party_branch_id,
+                po_id = COALESCE(:po_id, po_id),
                 remarks = :remarks,
                 src_com_id = :src_com_id,
                 updated_by = :updated_by,
                 updated_date_time = :updated_date_time
             WHERE jute_mr_id = :mr_id
         """)
-        
+
         db.execute(update_header_query, {
             "mr_id": mr_id,
             "mr_weight": mr_weight,
+            "jute_supplier_id": body.jute_supplier_id,
+            "party_id": body.party_id,
             "party_branch_id": body.party_branch_id,
+            "po_id": body.po_id,
             "remarks": body.remarks,
             "src_com_id": body.src_com_id,
             "updated_by": user_id,
