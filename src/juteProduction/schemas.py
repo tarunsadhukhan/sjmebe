@@ -269,6 +269,7 @@ class SpinningEmpBrkRow(BaseModel):
     loss_i: Optional[float] = 0.0
     total_loss: Optional[float] = 0.0
     actual_run: Optional[float] = 0.0
+    As_per_VVfd: Optional[float] = None
     machine_doff: Optional[float] = 0.0
     doff_wt: Optional[float] = 0.0
     rpm: Optional[float] = 0.0

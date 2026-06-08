@@ -51,20 +51,24 @@ def get_spinning_emp_brk_detail_query():
                 WHEN hepd.eb_id IS NULL THEN NULL
                 ELSE CONCAT(
                     hepd.first_name,
-                    IFNULL(hepd.middle_name, ''),
-                    IFNULL(hepd.last_name, '')
+                    IFNULL(hepd.middle_name, ' '),
+                    IFNULL(hepd.last_name, ' ')
                 )
             END                                                       AS emp_name,
             pds.machine_name                                         AS frame_no,
             pds.std_count                                            AS count,
-            pds.working_hours                                        AS power_min,
-            pds.loss_min_doff                                        AS loss_d,
-            pds.loss_min_mech                                        AS loss_m,
-            pds.loss_min_elec                                        AS loss_e,
-            pds.loss_min_oth                                         AS loss_i,
-            (COALESCE(pds.loss_min_doff, 0) + COALESCE(pds.loss_min_mech, 0)
-                + COALESCE(pds.loss_min_elec, 0) + COALESCE(pds.loss_min_oth, 0)) AS total_loss,
-            pds.netmins                                             AS actual_run,
+            ROUND(pds.working_hours/60, 2)                              AS power_min,
+            ROUND(COALESCE(pds.loss_min_doff, 0)/60, 2)                 AS loss_d,
+            ROUND(COALESCE(pds.loss_min_mech, 0)/60, 2)                 AS loss_m,
+            ROUND(COALESCE(pds.loss_min_elec, 0)/60, 2)                 AS loss_e,
+            ROUND(COALESCE(pds.loss_min_oth, 0)/60, 2)                  AS loss_i,
+            ROUND(
+                (COALESCE(pds.loss_min_doff, 0) + COALESCE(pds.loss_min_mech, 0)
+                + COALESCE(pds.loss_min_elec, 0) + COALESCE(pds.loss_min_oth, 0))
+                / 60
+            , 2)                                                    AS total_loss,
+            round(pds.netmins/60, 2)                                AS actual_run,
+            pds.mc_runs_time                                           AS As_per_VVfd,
             pds.noofdoff                                            AS machine_doff,
             ROUND(pds.weight, 2)                                    AS doff_wt,
             pds.speed                                              AS rpm,
@@ -93,7 +97,8 @@ def get_spinning_emp_brk_detail_query():
                 pd.weight / (fdm.speed * .12) * 100                   AS eff,
                 sfm.working_hours * 60                                AS working_hours,
                 (sfm.working_hours * 60)
-                    - (loss_min_doff + loss_min_elec + loss_min_mech + loss_min_oth) AS netmins,
+                    - (COALESCE(loss_min_doff, 0) + COALESCE(loss_min_elec, 0)
+                        + COALESCE(loss_min_mech, 0) + COALESCE(loss_min_oth, 0)) AS netmins,
                 tpi,
                 fdm.no_of_spindle
             FROM (
@@ -110,6 +115,7 @@ def get_spinning_emp_brk_detail_query():
                        ON ddt.doff_date = ddfw.tran_date
                       AND ddt.spell     = ddfw.spell
                       AND ddt.mc_id     = ddfw.mc_eb_id
+                      AND ddfw.spg_wdg  = 'S'
                 LEFT JOIN spell_mst sm ON sm.spell_id = ddt.spell
                 WHERE ddt.doff_date BETWEEN :from_date AND :to_date
                 GROUP BY ddt.doff_date, sm.shift_id, ddt.mc_id, ddfw.eb_id, ddfw.quality_id
