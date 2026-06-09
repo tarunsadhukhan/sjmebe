@@ -42,7 +42,7 @@ from sqlalchemy import text
 def get_spinning_emp_brk_detail_query():
     """One row per (date, shift, frame, employee, quality)."""
     sql = """
-        SELECT
+            SELECT
             DATE_FORMAT(pds.doff_date, '%d-%m-%Y')                     AS report_date,
             pds.shift_id                                              AS spell_id,
             pds.shift_name                                            AS shift_name,
@@ -51,24 +51,21 @@ def get_spinning_emp_brk_detail_query():
                 WHEN hepd.eb_id IS NULL THEN NULL
                 ELSE CONCAT(
                     hepd.first_name,
-                    IFNULL(hepd.middle_name, ' '),
-                    IFNULL(hepd.last_name, ' ')
+                    IFNULL(hepd.middle_name, ''),
+                    IFNULL(hepd.last_name, '')
                 )
             END                                                       AS emp_name,
             pds.machine_name                                         AS frame_no,
             pds.std_count                                            AS count,
-            ROUND(pds.working_hours/60, 2)                              AS power_min,
-            ROUND(COALESCE(pds.loss_min_doff, 0)/60, 2)                 AS loss_d,
-            ROUND(COALESCE(pds.loss_min_mech, 0)/60, 2)                 AS loss_m,
-            ROUND(COALESCE(pds.loss_min_elec, 0)/60, 2)                 AS loss_e,
-            ROUND(COALESCE(pds.loss_min_oth, 0)/60, 2)                  AS loss_i,
-            ROUND(
-                (COALESCE(pds.loss_min_doff, 0) + COALESCE(pds.loss_min_mech, 0)
-                + COALESCE(pds.loss_min_elec, 0) + COALESCE(pds.loss_min_oth, 0))
-                / 60
-            , 2)                                                    AS total_loss,
-            round(pds.netmins/60, 2)                                AS actual_run,
-            pds.mc_runs_time                                           AS As_per_VVfd,
+            round(pds.working_hours/60,2)                                        AS power_min,
+            round(pds.noofdoff*2/60,2) 	                                       AS loss_d,
+            round(pds.loss_min_mech/60,2)                                        AS loss_m,
+            round(pds.loss_min_elec/60,2)                                        AS loss_e,
+            round(pds.loss_min_oth/60,2)                                         AS loss_i,
+            round((COALESCE(pds.loss_min_doff, 0) + COALESCE(pds.loss_min_mech, 0)
+                + COALESCE(pds.loss_min_elec, 0) + COALESCE(pds.loss_min_oth, 0))/60,2) AS total_loss,
+            round(pds.netmins/60,2)                                             AS actual_run,
+            pds.mc_runs_time                                       AS As_per_VVfd,
             pds.noofdoff                                            AS machine_doff,
             ROUND(pds.weight, 2)                                    AS doff_wt,
             pds.speed                                              AS rpm,
@@ -82,28 +79,29 @@ def get_spinning_emp_brk_detail_query():
                     / (pds.tpi * 14400 * 36 * 2.2046)) * 100
             , 2)                                                    AS actual_eff
         FROM (
-            SELECT
-                pd.*,
+        SELECT
+                pd.doff_date,pd.shift_id,pd.mc_id,pd.eb_id,pd.quality_id,sum(noofdoff) noofdoff,sum(weight) weight, 
                 sfm.shift_name,
                 mm.machine_name,
                 fdm.speed,
                 sqm.std_count,
-                vvfd.mc_runs_time,
-                vvfd.loss_min_doff,
-                vvfd.loss_min_elec,
-                vvfd.loss_min_mech,
-                vvfd.loss_min_oth,
-                fdm.speed * .12                                       AS eff100,
-                pd.weight / (fdm.speed * .12) * 100                   AS eff,
-                sfm.working_hours * 60                                AS working_hours,
-                (sfm.working_hours * 60)
-                    - (COALESCE(loss_min_doff, 0) + COALESCE(loss_min_elec, 0)
-                        + COALESCE(loss_min_mech, 0) + COALESCE(loss_min_oth, 0)) AS netmins,
+                sum(vvfd.mc_runs_time)  mc_runs_time,
+                sum(vvfd.loss_min_doff) loss_min_doff,
+                sum(vvfd.loss_min_elec) loss_min_elec,
+                sum(vvfd.loss_min_mech) loss_min_mech,
+                sum(vvfd.loss_min_oth ) loss_min_oth
+                ,
+--                fdm.speed * .12                                       AS eff100,
+--                pd.weight / (fdm.speed * .12) * 100                   AS eff,
+                  sum(sfm.working_hours * 60)                                 AS working_hours,
+                sum((sfm.working_hours * 60)
+                    - (COALESCE(loss_min_doff,0) + COALESCE(loss_min_elec,0) + COALESCE(loss_min_mech,0) + COALESCE(loss_min_oth,0))) AS netmins,
                 tpi,
                 fdm.no_of_spindle
             FROM (
-                SELECT
+            SELECT
                     ddt.doff_date,
+             		sm.spell_id, 
                     sm.shift_id,
                     ddt.mc_id,
                     ddfw.eb_id,
@@ -115,25 +113,35 @@ def get_spinning_emp_brk_detail_query():
                        ON ddt.doff_date = ddfw.tran_date
                       AND ddt.spell     = ddfw.spell
                       AND ddt.mc_id     = ddfw.mc_eb_id
-                      AND ddfw.spg_wdg  = 'S'
                 LEFT JOIN spell_mst sm ON sm.spell_id = ddt.spell
                 WHERE ddt.doff_date BETWEEN :from_date AND :to_date
-                GROUP BY ddt.doff_date, sm.shift_id, ddt.mc_id, ddfw.eb_id, ddfw.quality_id
-            ) pd
+      			group by                     ddt.doff_date,
+             		sm.spell_id, 
+                    sm.shift_id,
+                    ddt.mc_id,
+                    ddfw.eb_id,
+                    ddfw.quality_id
+                ) pd
             LEFT JOIN (
                 SELECT tdvt.*, sm.shift_id
                 FROM tbl_daily_vvfd_transaction tdvt
                 LEFT JOIN spell_mst sm ON tdvt.spell_id = sm.spell_id
             ) vvfd
                    ON pd.doff_date = vvfd.tran_date
-                  AND pd.shift_id  = vvfd.shift_id
+                  AND pd.spell_id  = vvfd.spell_id
                   AND pd.mc_id     = vvfd.mc_id
             LEFT JOIN shift_mst sfm ON sfm.shift_id = pd.shift_id
-            LEFT JOIN machine_mst mm ON mm.machine_id = pd.mc_id
+           LEFT JOIN machine_mst mm ON mm.machine_id = pd.mc_id
             LEFT JOIN frame_details_mst fdm ON fdm.mc_id = pd.mc_id
-            LEFT JOIN spinning_quality_mst sqm ON sqm.spg_quality_mst_id = pd.quality_id
-        ) pds
-        LEFT JOIN hrms_ed_official_details heod
+             LEFT JOIN spinning_quality_mst sqm ON sqm.spg_quality_mst_id = pd.quality_id
+                GROUP BY pd.doff_date, pd.shift_id, pd.mc_id, pd.eb_id, pd.quality_id,
+                         sfm.shift_name,
+                mm.machine_name,
+                fdm.speed,
+                sqm.std_count,         tpi,
+                fdm.no_of_spindle
+                                          ) pds
+                          LEFT JOIN hrms_ed_official_details heod
                ON pds.eb_id = heod.eb_id AND heod.active = 1
         LEFT JOIN hrms_ed_personal_details hepd
                ON pds.eb_id = hepd.eb_id

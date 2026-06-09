@@ -780,7 +780,8 @@ def get_open_jute_pos_by_supplier_query(include_party: bool = False):
         SELECT
             jp.jute_po_id,
             {po_num_expr} AS po_num,
-            jp.po_date
+            jp.po_date,
+            jp.dalta_pc
         FROM jute_po jp
         INNER JOIN branch_mst bm ON bm.branch_id = jp.branch_id
         INNER JOIN co_mst cm ON cm.co_id = bm.co_id
@@ -1335,6 +1336,8 @@ def get_jute_mr_by_id_query():
             COALESCE(sm.status_name, 'Open') AS status,
             jm.src_com_id,
             jm.jute_gate_entry_date,
+            jm.jute_gate_entry_no,
+            jp.dalta_pc AS po_dalta_pc,
             jm.updated_by,
             jm.updated_date_time
         FROM jute_mr jm
