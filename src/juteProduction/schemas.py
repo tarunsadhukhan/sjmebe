@@ -267,6 +267,7 @@ class SpinningEmpBrkRow(BaseModel):
     loss_m: Optional[float] = 0.0
     loss_e: Optional[float] = 0.0
     loss_i: Optional[float] = 0.0
+    loss_idle: Optional[float] = 0.0
     total_loss: Optional[float] = 0.0
     actual_run: Optional[float] = 0.0
     As_per_VVfd: Optional[float] = None

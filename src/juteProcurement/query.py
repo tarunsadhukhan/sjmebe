@@ -608,6 +608,7 @@ def get_jute_gate_entry_by_id_query():
             jm.transporter,
             jm.po_id,
             jp.po_no,
+            jp.dalta_pc AS po_dalta_pc,
             CASE WHEN jp.jute_po_id IS NOT NULL THEN {po_num_expr} ELSE NULL END AS po_num,
             jm.jute_supplier_id,
             jsm.supplier_name,
