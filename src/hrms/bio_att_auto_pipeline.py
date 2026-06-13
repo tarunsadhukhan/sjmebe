@@ -155,6 +155,12 @@ _UPSERT_LAST_ID_SQL = text(
 
 _MAX_BIO_ATT_ID_SQL = text("SELECT MAX(bio_att_id) AS max_id FROM bio_attendance_table")
 
+# MySQL named lock — guarantees a single concurrent run even when the app is
+# launched with multiple uvicorn workers (each starts its own scheduler).
+_LOCK_NAME = "bio_att_auto"
+_GET_LOCK_SQL = text("SELECT GET_LOCK(:name, 0) AS got")
+_RELEASE_LOCK_SQL = text("SELECT RELEASE_LOCK(:name)")
+
 _NEW_DATES_SQL = text(
     """
     SELECT DISTINCT DATE(log_date) AS d
@@ -213,7 +219,23 @@ def run_once(tenant: str, branch_id: int, company_id: int = 2) -> dict:
     Returns a summary dict.
     """
     db = make_session(tenant)
+    # Dedicated session for the named lock: GET_LOCK is connection-scoped, so we
+    # keep this session on a single connection (never commit on it) for the whole
+    # run while `db` commits freely across the chain.
+    lock_db = make_session(tenant)
+    locked = False
     try:
+        # Single-run guard across workers/instances. If another run holds the
+        # lock, skip immediately rather than queueing.
+        got = lock_db.execute(_GET_LOCK_SQL, {"name": _LOCK_NAME}).scalar()
+        if not got:
+            log.info(
+                "Another bio_att_auto run holds the lock — skipping this tick "
+                "(tenant=%s branch=%s).", tenant, branch_id,
+            )
+            return {"skipped": True, "reason": "locked"}
+        locked = True
+
         _ensure_state_table(db)
         last_id = _get_last_bio_att_id(db, branch_id)
         current_max = _get_max_bio_att_id(db)
@@ -265,6 +287,15 @@ def run_once(tenant: str, branch_id: int, company_id: int = 2) -> dict:
             "failed": failed,
         }
     finally:
+        if locked:
+            try:
+                lock_db.execute(_RELEASE_LOCK_SQL, {"name": _LOCK_NAME})
+            except Exception:
+                pass
+        try:
+            lock_db.close()
+        except Exception:
+            pass
         try:
             db.close()
         except Exception:
