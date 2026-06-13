@@ -170,6 +170,15 @@ _NEW_DATES_SQL = text(
     """
 )
 
+_DATES_SINCE_SQL = text(
+    """
+    SELECT DISTINCT DATE(log_date) AS d
+    FROM bio_attendance_table
+    WHERE log_date IS NOT NULL AND DATE(log_date) >= :since
+    ORDER BY d
+    """
+)
+
 
 def _ensure_state_table(db: Session) -> None:
     db.execute(_CREATE_STATE_SQL)
@@ -186,13 +195,22 @@ def _get_max_bio_att_id(db: Session):
     return row["max_id"] if row else None
 
 
-def _get_new_dates(db: Session, last_id: int) -> list[date]:
-    rows = db.execute(_NEW_DATES_SQL, {"last_id": last_id}).fetchall()
+def _rows_to_dates(rows) -> list[date]:
     out: list[date] = []
     for r in rows:
         d = r[0]
         out.append(d if isinstance(d, date) else date.fromisoformat(str(d)))
     return out
+
+
+def _get_new_dates(db: Session, last_id: int) -> list[date]:
+    return _rows_to_dates(db.execute(_NEW_DATES_SQL, {"last_id": last_id}).fetchall())
+
+
+def _get_dates_since(db: Session, since: date) -> list[date]:
+    return _rows_to_dates(
+        db.execute(_DATES_SINCE_SQL, {"since": since.isoformat()}).fetchall()
+    )
 
 
 def _set_last_bio_att_id(db: Session, branch_id: int, last_id: int) -> None:
@@ -211,11 +229,22 @@ def _run_chain_for_date(db: Session, tran_date: str, branch_id: int) -> None:
     step3_final_process(db, tran_date=tran_date, branch_id=branch_id, dry_run=False)
 
 
-def run_once(tenant: str, branch_id: int, company_id: int = 2) -> dict:
+def run_once(
+    tenant: str,
+    branch_id: int,
+    company_id: int = 2,
+    since: date | None = None,
+) -> dict:
     """One pipeline pass for the given tenant/branch.
 
-    Detects new punches via the bio_att_id high-water mark, processes the
-    affected dates (+ prior day each), then advances the high-water mark.
+    Normal mode (since=None): detects new punches via the bio_att_id high-water
+    mark, processes the affected dates (+ prior day each), then advances the
+    high-water mark.
+
+    Seeding mode (since set): ignores the high-water mark and processes every
+    distinct date on/after `since`, then advances the high-water mark to the
+    current max so subsequent runs are incremental. Use for a bounded first run.
+
     Returns a summary dict.
     """
     db = make_session(tenant)
@@ -237,24 +266,35 @@ def run_once(tenant: str, branch_id: int, company_id: int = 2) -> dict:
         locked = True
 
         _ensure_state_table(db)
-        last_id = _get_last_bio_att_id(db, branch_id)
         current_max = _get_max_bio_att_id(db)
-
-        if should_skip(current_max, last_id):
-            log.info(
-                "No new data for tenant=%s branch=%s (max=%s, last=%s) — skipping.",
-                tenant, branch_id, current_max, last_id,
-            )
-            return {"skipped": True, "max_id": current_max, "last_id": last_id}
-
+        if current_max is None:
+            log.info("bio_attendance_table is empty for tenant=%s — nothing to do.", tenant)
+            return {"skipped": True, "reason": "empty"}
         current_max = int(current_max)
-        new_dates = _get_new_dates(db, last_id)
-        dates = compute_dates_to_process(new_dates)
-        log.info(
-            "tenant=%s branch=%s: %d new-date(s) -> processing %d date(s): %s",
-            tenant, branch_id, len(new_dates), len(dates),
-            [d.isoformat() for d in dates],
-        )
+
+        if since is not None:
+            dates = sorted(set(_get_dates_since(db, since)))
+            log.info(
+                "tenant=%s branch=%s: SEEDING from %s -> processing %d date(s): %s",
+                tenant, branch_id, since.isoformat(), len(dates),
+                [d.isoformat() for d in dates],
+            )
+        else:
+            last_id = _get_last_bio_att_id(db, branch_id)
+            if should_skip(current_max, last_id):
+                log.info(
+                    "No new data for tenant=%s branch=%s (max=%s, last=%s) — skipping.",
+                    tenant, branch_id, current_max, last_id,
+                )
+                return {"skipped": True, "max_id": current_max, "last_id": last_id}
+
+            new_dates = _get_new_dates(db, last_id)
+            dates = compute_dates_to_process(new_dates)
+            log.info(
+                "tenant=%s branch=%s: %d new-date(s) -> processing %d date(s): %s",
+                tenant, branch_id, len(new_dates), len(dates),
+                [d.isoformat() for d in dates],
+            )
 
         processed: list[str] = []
         failed: list[str] = []
@@ -380,6 +420,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--tenant", required=True, help="MySQL tenant/subdomain DB name")
     p.add_argument("--branch", required=True, type=int, help="branch_id")
     p.add_argument("--company_id", default=2, type=int)
+    p.add_argument(
+        "--since",
+        default=None,
+        help="YYYY-MM-DD: bounded first run — process every date on/after this "
+             "date, then seed the high-water mark so later runs are incremental.",
+    )
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = p.parse_args(argv)
 
@@ -388,7 +434,15 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    result = run_once(args.tenant, args.branch, args.company_id)
+
+    since = None
+    if args.since:
+        try:
+            since = date.fromisoformat(args.since)
+        except ValueError:
+            p.error(f"--since {args.since!r} is not a valid YYYY-MM-DD date")
+
+    result = run_once(args.tenant, args.branch, args.company_id, since=since)
     log.info("run_once result: %s", result)
 
 
