@@ -3340,102 +3340,17 @@ async def bio_att_bprocess(
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="branch_id must be an integer")
 
-        unresolved_rows = db.execute(_ETRACK_PROC_UNRESOLVED_SQL).fetchall()
-
-        resolve_result = {
-            "resolved": 0,
-            "updated": 0,
-            "from_daily_attendance": 0,
-            "fallback_official": 0,
-            "no_source": 0,
-        }
-
-        if unresolved_rows:
-            emp_eb_map: dict[str, int] = {
-                str(r.emp_code): int(r.eb_id)
-                for r in unresolved_rows
-                if r.eb_id is not None
-            }
-
-            if emp_eb_map:
-                unique_eb_ids = list(set(emp_eb_map.values()))
-
-                da_rows = db.execute(
-                    _ETRACK_PROC_LAST_DAILY_ATT_SQL,
-                    {"eb_ids": tuple(unique_eb_ids)},
-                ).fetchall()
-                da_map: dict[int, tuple] = {
-                    int(r.eb_id): (r.worked_department_id, r.worked_designation_id)
-                    for r in da_rows
-                    if r.worked_department_id is not None
-                }
-
-                missing_eb_ids = [eid for eid in unique_eb_ids if eid not in da_map]
-                official_map: dict[int, tuple] = {}
-                if missing_eb_ids:
-                    off_rows = db.execute(
-                        _ETRACK_PROC_OFFICIAL_SQL,
-                        {"eb_ids": tuple(missing_eb_ids)},
-                    ).fetchall()
-                    official_map = {
-                        int(r.eb_id): (r.dept_id, r.desig_id)
-                        for r in off_rows
-                    }
-
-                updated = 0
-                fallback_official = 0
-                no_source = 0
-
-                for emp_code, eb_id in emp_eb_map.items():
-                    if eb_id in da_map:
-                        dept_id, desig_id = da_map[eb_id]
-                    elif eb_id in official_map:
-                        dept_id, desig_id = official_map[eb_id]
-                        fallback_official += 1
-                    else:
-                        no_source += 1
-                        continue
-
-                    res = db.execute(
-                        _ETRACK_PROC_UPDATE_SQL,
-                        {
-                            "eb_id": eb_id,
-                            "dept_id": dept_id,
-                            "desig_id": desig_id,
-                            "emp_code": emp_code,
-                        },
-                    )
-                    updated += int(res.rowcount or 0)
-
-                db.commit()
-
-                resolve_result = {
-                    "resolved": len(emp_eb_map),
-                    "updated": updated,
-                    "from_daily_attendance": len(da_map),
-                    "fallback_official": fallback_official,
-                    "no_source": no_source,
-                }
-
-        is_off_row = db.execute(IS_OFF_DAY_SQL, {"tran_date": tran_date}).fetchone()
-        is_off_day = bool(is_off_row and int(is_off_row.cnt) > 0)
-
-        db.execute(DELETE_DAY_ROWS_SQL, {"tran_date": tran_date})
-        db.commit()
-
-        inserted = _process_bprocess_day(
-            db, tran_date=tran_date, is_off_day=is_off_day,
-        )
-        db.commit()
+        # Resolve + process with Bprocess rules (shared with the pipeline).
+        core = bprocess_core(db, tran_date)
 
         return {
             "status": "ok",
             "tran_date": tran_date,
             "branch_id": branch_id,
-            "is_off_day": is_off_day,
-            "resolve": resolve_result,
+            "is_off_day": core["is_off_day"],
+            "resolve": core["resolve"],
             "process": {
-                "total_inserted": inserted,
+                "total_inserted": core["inserted"],
             },
         }
 
@@ -3489,101 +3404,15 @@ async def bio_att_b_atten(
                 detail=f"Invalid tran_date {tran_date_raw!r}, expected YYYY-MM-DD",
             )
 
-        # Off-day flag drives attendance_type R vs O.
-        off_row = db.execute(IS_OFF_DAY_SQL, {"tran_date": tran_date}).first()
-        is_off_day = bool(off_row[0]) if off_row else False
-
-        # Wipe existing spell rows for the date so this is idempotent.
-        db.execute(DELETE_DAY_ROWS_SQL, {"tran_date": tran_date})
-
-        basic_rows = db.execute(
-            text(
-                """
-                SELECT eb_id, bio_id, dept_id, desig_id, shift,
-                       actual_in, actual_out,
-                       work_dur_minutes, ot_minutes, total_dur_minutes
-                FROM daily_attendance_basic
-                WHERE tran_date = :tran_date
-                """
-            ),
-            {"tran_date": tran_date},
-        ).fetchall()
-
-        inserted = 0
-        for r in basic_rows:
-            m = r._mapping
-            shift = m["shift"]
-            actual_in = m["actual_in"]
-            intime_h = (
-                actual_in.hour + actual_in.minute / 60.0 + actual_in.second / 3600.0
-                if isinstance(actual_in, datetime) else 0.0
-            )
-            work_min = int(m["work_dur_minutes"] or 0)
-            ot_min   = int(m["ot_minutes"] or 0)
-
-            common_base = {
-                "eb_id":     int(m["eb_id"]),
-                "bio_id":    int(m["bio_id"]) if m["bio_id"] is not None else None,
-                "dept_id":   int(m["dept_id"]) if m["dept_id"] is not None else None,
-                "desig_id":  int(m["desig_id"]) if m["desig_id"] is not None else None,
-                "tran_date": tran_date,
-                "check_in":   actual_in,
-                "check_out":  m["actual_out"],
-                "spell_hours": SPELL_HOURS,
-            }
-
-            # ── R (working-hours) row ──
-            r_bucket = _minutes_bucket(work_min)
-            if r_bucket >= 0:
-                spell = _spell_label_for_b_atten(shift, "R", r_bucket, intime_h)
-                spell_start, spell_end = _BPROCESS_SPELL_TIMES.get(
-                    spell, ("00:00:00", "00:00:00"),
-                )
-                db.execute(
-                    INSERT_SPELL_ROW_SQL,
-                    {
-                        **common_base,
-                        "spell_name":      spell,
-                        "attendance_type": "O" if is_off_day else "R",
-                        "time_duration":   r_bucket,
-                        "working_hours":   r_bucket,
-                        "ot_hours":        0,
-                        "spell_start":     spell_start,
-                        "spell_end":       spell_end,
-                    },
-                )
-                inserted += 1
-
-            # ── O (overtime) row ──
-            o_bucket = _minutes_bucket(ot_min)
-            if o_bucket >= 0:
-                spell = _spell_label_for_b_atten(shift, "O", o_bucket, intime_h)
-                spell_start, spell_end = _BPROCESS_SPELL_TIMES.get(
-                    spell, ("00:00:00", "00:00:00"),
-                )
-                db.execute(
-                    INSERT_SPELL_ROW_SQL,
-                    {
-                        **common_base,
-                        "spell_name":      spell,
-                        "attendance_type": "O",
-                        "time_duration":   o_bucket,
-                        "working_hours":   o_bucket,
-                        "ot_hours":        0,
-                        "spell_start":     spell_start,
-                        "spell_end":       spell_end,
-                    },
-                )
-                inserted += 1
-
-        db.commit()
+        # Project daily_attendance_basic -> process table (shared with pipeline).
+        core = b_atten_core(db, tran_date)
 
         return {
             "status": "ok",
             "tran_date": tran_date,
-            "is_off_day": is_off_day,
-            "basic_rows": len(basic_rows),
-            "inserted": inserted,
+            "is_off_day": core["is_off_day"],
+            "basic_rows": core["basic_rows"],
+            "inserted": core["inserted"],
         }
 
     except HTTPException:
@@ -3731,6 +3560,258 @@ def _etrack_resolve_and_process(db: Session, tran_date: str) -> dict:
     }
 
 
+def etrack_process_d_core(db: Session, tran_date: str) -> dict:
+    """Etrack Process (D) core. Runs the three pre-steps on bio_attendance_table
+    then the shared resolve + process. Shared by the /bio_att_etrack_process_d
+    route and the automated pipeline (bio_att_auto_pipeline).
+
+      0.  emp_code      <- tbl_master_bio_link_mst.master_data
+      0b. bio_att_log_id <- generated 500000+ sequence where blank (NULL or 0).
+      0c. device_id      <- 22 when device_direction='in', else 14.
+
+    Returns the resolve/process dict plus the three pre-step row counts.
+    """
+    # ── Step 0: back-fill emp_code from link master (bio_id -> emp_code) ─
+    empcode_res = db.execute(_ETRACK_PROC_EMPCODE_UPDATE_SQL)
+    emp_code_updated = int(empcode_res.rowcount or 0)
+    db.commit()
+
+    # ── Step 0b: fill blank bio_att_log_id with a generated sequence ────
+    logid_max_row = db.execute(
+        text("SELECT MAX(bio_att_log_id) AS max_id FROM bio_attendance_table")
+    ).mappings().first()
+    cur_max_log_id = (
+        int(logid_max_row["max_id"])
+        if logid_max_row and logid_max_row["max_id"] is not None
+        else 0
+    )
+    logid_base = 500000 if cur_max_log_id < 500000 else cur_max_log_id + 1
+    db.execute(_ETRACK_PROC_LOGID_INIT_SQL, {"base": logid_base})
+    logid_res = db.execute(_ETRACK_PROC_LOGID_FILL_SQL)
+    bio_att_log_id_filled = int(logid_res.rowcount or 0)
+    db.commit()
+
+    # ── Step 0c: set device_id from direction ('in'->22, else 14) ───────
+    device_id_res = db.execute(_ETRACK_PROC_DEVICE_ID_SQL)
+    device_id_updated = int(device_id_res.rowcount or 0)
+    db.commit()
+
+    # Resolve eb_id / dept_id / desig_id, then build the day's spell rows.
+    core = _etrack_resolve_and_process(db, tran_date)
+    return {
+        "emp_code_updated": emp_code_updated,
+        "bio_att_log_id_filled": bio_att_log_id_filled,
+        "device_id_updated": device_id_updated,
+        **core,
+    }
+
+
+def bprocess_core(db: Session, tran_date: str) -> dict:
+    """Bprocess core. Same eb_id/dept_id/desig_id resolve as Etrack Process, but
+    builds the day's spell rows with the Bprocess rules (cross-midnight C/C1) and
+    writes daily_attendance_basic via _process_bprocess_day. Shared by the
+    /bio_att_bprocess route and the automated pipeline.
+
+    Returns {"resolve": {...}, "is_off_day": bool, "inserted": int}.
+    """
+    unresolved_rows = db.execute(_ETRACK_PROC_UNRESOLVED_SQL).fetchall()
+
+    resolve_result = {
+        "resolved": 0,
+        "updated": 0,
+        "from_daily_attendance": 0,
+        "fallback_official": 0,
+        "no_source": 0,
+    }
+
+    if unresolved_rows:
+        emp_eb_map: dict[str, int] = {
+            str(r.emp_code): int(r.eb_id)
+            for r in unresolved_rows
+            if r.eb_id is not None
+        }
+
+        if emp_eb_map:
+            unique_eb_ids = list(set(emp_eb_map.values()))
+
+            da_rows = db.execute(
+                _ETRACK_PROC_LAST_DAILY_ATT_SQL,
+                {"eb_ids": tuple(unique_eb_ids)},
+            ).fetchall()
+            da_map: dict[int, tuple] = {
+                int(r.eb_id): (r.worked_department_id, r.worked_designation_id)
+                for r in da_rows
+                if r.worked_department_id is not None
+            }
+
+            missing_eb_ids = [eid for eid in unique_eb_ids if eid not in da_map]
+            official_map: dict[int, tuple] = {}
+            if missing_eb_ids:
+                off_rows = db.execute(
+                    _ETRACK_PROC_OFFICIAL_SQL,
+                    {"eb_ids": tuple(missing_eb_ids)},
+                ).fetchall()
+                official_map = {
+                    int(r.eb_id): (r.dept_id, r.desig_id)
+                    for r in off_rows
+                }
+
+            updated = 0
+            fallback_official = 0
+            no_source = 0
+
+            for emp_code, eb_id in emp_eb_map.items():
+                if eb_id in da_map:
+                    dept_id, desig_id = da_map[eb_id]
+                elif eb_id in official_map:
+                    dept_id, desig_id = official_map[eb_id]
+                    fallback_official += 1
+                else:
+                    no_source += 1
+                    continue
+
+                res = db.execute(
+                    _ETRACK_PROC_UPDATE_SQL,
+                    {
+                        "eb_id": eb_id,
+                        "dept_id": dept_id,
+                        "desig_id": desig_id,
+                        "emp_code": emp_code,
+                    },
+                )
+                updated += int(res.rowcount or 0)
+
+            db.commit()
+
+            resolve_result = {
+                "resolved": len(emp_eb_map),
+                "updated": updated,
+                "from_daily_attendance": len(da_map),
+                "fallback_official": fallback_official,
+                "no_source": no_source,
+            }
+
+    is_off_row = db.execute(IS_OFF_DAY_SQL, {"tran_date": tran_date}).fetchone()
+    is_off_day = bool(is_off_row and int(is_off_row.cnt) > 0)
+
+    db.execute(DELETE_DAY_ROWS_SQL, {"tran_date": tran_date})
+    db.commit()
+
+    inserted = _process_bprocess_day(
+        db, tran_date=tran_date, is_off_day=is_off_day,
+    )
+    db.commit()
+
+    return {
+        "resolve": resolve_result,
+        "is_off_day": is_off_day,
+        "inserted": inserted,
+    }
+
+
+def b_atten_core(db: Session, tran_date: str) -> dict:
+    """B Atten core. Projects rows from daily_attendance_basic into
+    daily_attendance_process_table for tran_date. Shared by the /bio_att_b_atten
+    route and the automated pipeline.
+
+    Returns {"is_off_day": bool, "basic_rows": int, "inserted": int}.
+    """
+    # Off-day flag drives attendance_type R vs O.
+    off_row = db.execute(IS_OFF_DAY_SQL, {"tran_date": tran_date}).first()
+    is_off_day = bool(off_row[0]) if off_row else False
+
+    # Wipe existing spell rows for the date so this is idempotent.
+    db.execute(DELETE_DAY_ROWS_SQL, {"tran_date": tran_date})
+
+    basic_rows = db.execute(
+        text(
+            """
+            SELECT eb_id, bio_id, dept_id, desig_id, shift,
+                   actual_in, actual_out,
+                   work_dur_minutes, ot_minutes, total_dur_minutes
+            FROM daily_attendance_basic
+            WHERE tran_date = :tran_date
+            """
+        ),
+        {"tran_date": tran_date},
+    ).fetchall()
+
+    inserted = 0
+    for r in basic_rows:
+        m = r._mapping
+        shift = m["shift"]
+        actual_in = m["actual_in"]
+        intime_h = (
+            actual_in.hour + actual_in.minute / 60.0 + actual_in.second / 3600.0
+            if isinstance(actual_in, datetime) else 0.0
+        )
+        work_min = int(m["work_dur_minutes"] or 0)
+        ot_min   = int(m["ot_minutes"] or 0)
+
+        common_base = {
+            "eb_id":     int(m["eb_id"]),
+            "bio_id":    int(m["bio_id"]) if m["bio_id"] is not None else None,
+            "dept_id":   int(m["dept_id"]) if m["dept_id"] is not None else None,
+            "desig_id":  int(m["desig_id"]) if m["desig_id"] is not None else None,
+            "tran_date": tran_date,
+            "check_in":   actual_in,
+            "check_out":  m["actual_out"],
+            "spell_hours": SPELL_HOURS,
+        }
+
+        # ── R (working-hours) row ──
+        r_bucket = _minutes_bucket(work_min)
+        if r_bucket >= 0:
+            spell = _spell_label_for_b_atten(shift, "R", r_bucket, intime_h)
+            spell_start, spell_end = _BPROCESS_SPELL_TIMES.get(
+                spell, ("00:00:00", "00:00:00"),
+            )
+            db.execute(
+                INSERT_SPELL_ROW_SQL,
+                {
+                    **common_base,
+                    "spell_name":      spell,
+                    "attendance_type": "O" if is_off_day else "R",
+                    "time_duration":   r_bucket,
+                    "working_hours":   r_bucket,
+                    "ot_hours":        0,
+                    "spell_start":     spell_start,
+                    "spell_end":       spell_end,
+                },
+            )
+            inserted += 1
+
+        # ── O (overtime) row ──
+        o_bucket = _minutes_bucket(ot_min)
+        if o_bucket >= 0:
+            spell = _spell_label_for_b_atten(shift, "O", o_bucket, intime_h)
+            spell_start, spell_end = _BPROCESS_SPELL_TIMES.get(
+                spell, ("00:00:00", "00:00:00"),
+            )
+            db.execute(
+                INSERT_SPELL_ROW_SQL,
+                {
+                    **common_base,
+                    "spell_name":      spell,
+                    "attendance_type": "O",
+                    "time_duration":   o_bucket,
+                    "working_hours":   o_bucket,
+                    "ot_hours":        0,
+                    "spell_start":     spell_start,
+                    "spell_end":       spell_end,
+                },
+            )
+            inserted += 1
+
+    db.commit()
+
+    return {
+        "is_off_day": is_off_day,
+        "basic_rows": len(basic_rows),
+        "inserted": inserted,
+    }
+
+
 @router.post("/bio_att_etrack_process")
 async def bio_att_etrack_process(
     request: Request,
@@ -3827,48 +3908,17 @@ async def bio_att_etrack_process_d(
 
         tran_date, branch_id = _parse_etrack_proc_params(body, qp)
 
-        # ── Step 0: back-fill emp_code from link master (bio_id -> emp_code) ─
-        # Match tbl_master_bio_link_mst.bio_dev_id against bio_attendance_table.bio_id
-        # (match_type='E') and set emp_code = master_data for every matching row,
-        # so the emp_code -> eb_id resolution below runs on corrected codes.
-        empcode_res = db.execute(_ETRACK_PROC_EMPCODE_UPDATE_SQL)
-        emp_code_updated = int(empcode_res.rowcount or 0)
-        db.commit()
-
-        # ── Step 0b: fill blank bio_att_log_id with a generated sequence ────
-        # Base = 500000 when the table max is below 500000, else max + 1.
-        # Computed in Python (can't read the same table in an UPDATE subquery),
-        # then a session variable assigns sequential ids to the blank rows.
-        logid_max_row = db.execute(
-            text("SELECT MAX(bio_att_log_id) AS max_id FROM bio_attendance_table")
-        ).mappings().first()
-        cur_max_log_id = (
-            int(logid_max_row["max_id"])
-            if logid_max_row and logid_max_row["max_id"] is not None
-            else 0
-        )
-        logid_base = 500000 if cur_max_log_id < 500000 else cur_max_log_id + 1
-        db.execute(_ETRACK_PROC_LOGID_INIT_SQL, {"base": logid_base})
-        logid_res = db.execute(_ETRACK_PROC_LOGID_FILL_SQL)
-        bio_att_log_id_filled = int(logid_res.rowcount or 0)
-        db.commit()
-
-        # ── Step 0c: set device_id from direction ('in'->22, else 14) ───────
-        device_id_res = db.execute(_ETRACK_PROC_DEVICE_ID_SQL)
-        device_id_updated = int(device_id_res.rowcount or 0)
-        db.commit()
-
-        # Resolve eb_id / dept_id / desig_id, then build the day's spell rows.
-        core = _etrack_resolve_and_process(db, tran_date)
+        # Pre-steps + resolve + process (shared with the automated pipeline).
+        core = etrack_process_d_core(db, tran_date)
 
         return {
             "status": "ok",
             "tran_date": tran_date,
             "branch_id": branch_id,
             "is_off_day": core["is_off_day"],
-            "emp_code_updated": emp_code_updated,
-            "bio_att_log_id_filled": bio_att_log_id_filled,
-            "device_id_updated": device_id_updated,
+            "emp_code_updated": core["emp_code_updated"],
+            "bio_att_log_id_filled": core["bio_att_log_id_filled"],
+            "device_id_updated": core["device_id_updated"],
             "resolve": core["resolve"],
             "process": {
                 "total_inserted": core["inserted"],
