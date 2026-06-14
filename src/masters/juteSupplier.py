@@ -15,7 +15,6 @@ from src.common.utils import now_ist
 
 router = APIRouter()
 
-
 def get_jute_supplier_list_query():
     """
     Get all jute suppliers (global - not company-specific).
