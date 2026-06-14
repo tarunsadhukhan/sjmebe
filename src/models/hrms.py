@@ -95,6 +95,7 @@ class HrmsEdOfficialDetails(Base):
 	contractor_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 	office_mobile_no: Mapped[str | None] = mapped_column(String(255), nullable=True)
 	office_email_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+	bio_metric_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 # tbl_hrms_ed_pf → hrms_ed_pf
 class HrmsEdPf(Base):

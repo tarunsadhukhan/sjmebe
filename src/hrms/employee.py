@@ -37,8 +37,8 @@ from .query import (
     check_emp_code_duplicate,
 )
 from .schemas import SectionSaveRequest
-from .constants import EMPLOYEE_SECTIONS, EMPLOYEE_LIFECYCLE_STATUS, RESIGN_DETAIL_STATUSES
-from sqlalchemy import inspect as sa_inspect, String as SAString
+from .constants import EMPLOYEE_SECTIONS, EMPLOYEE_STATUS, EMPLOYEE_LIFECYCLE_STATUS, RESIGN_DETAIL_STATUSES
+from sqlalchemy import inspect as sa_inspect, String as SAString, text
 
 router = APIRouter()
 
@@ -58,6 +58,58 @@ def _sanitize_empty_values(model_cls, data: dict) -> dict:
         if key in data and data[key] == "":
             data[key] = None
     return data
+
+
+def _upsert_bio_link(db: Session, eb_id: int, emp_code, bio_metric_id) -> None:
+    """Mirror the employee's emp_code / eb_id / bio id into tbl_master_bio_link_mst
+    (match_type 'E'). Inserts a new row when no 'E' link exists for this eb_id,
+    otherwise updates the existing one — so it stays in sync on both create and edit.
+
+    Columns:  master_data = emp_code,  master_id = eb_id,
+              bio_data = bio id (string),  bio_dev_id = bio id (int).
+    """
+    code = str(emp_code).strip() if emp_code is not None else ""
+    bio_str = "" if bio_metric_id is None else str(bio_metric_id).strip()
+    bio_dev = None
+    if bio_str:
+        try:
+            bio_dev = int(bio_str)
+        except (TypeError, ValueError):
+            bio_dev = None
+
+    params = {
+        "eb_id": int(eb_id),
+        "emp_code": code or None,
+        "bio_data": bio_str or None,
+        "bio_dev_id": bio_dev,
+    }
+
+    existing = db.execute(
+        text(
+            "SELECT tbl_mst_bio_link_id FROM tbl_master_bio_link_mst "
+            "WHERE match_type = 'E' AND master_id = :eb_id LIMIT 1"
+        ),
+        {"eb_id": int(eb_id)},
+    ).first()
+
+    if existing:
+        db.execute(
+            text(
+                "UPDATE tbl_master_bio_link_mst "
+                "SET master_data = :emp_code, bio_data = :bio_data, bio_dev_id = :bio_dev_id "
+                "WHERE tbl_mst_bio_link_id = :id"
+            ),
+            {**params, "id": existing[0]},
+        )
+    else:
+        db.execute(
+            text(
+                "INSERT INTO tbl_master_bio_link_mst "
+                "(master_data, master_id, match_type, bio_data, bio_dev_id) "
+                "VALUES (:emp_code, :eb_id, 'E', :bio_data, :bio_dev_id)"
+            ),
+            params,
+        )
 
 
 def _optional_auth(request: Request):
@@ -519,6 +571,8 @@ async def employee_section_save(
             for key, val in section_data.items():
                 if hasattr(existing, key) and key != pk_field:
                     setattr(existing, key, val)
+            if section == "official":
+                _upsert_bio_link(db, eb_id, section_data.get("emp_code"), section_data.get("bio_metric_id"))
             db.commit()
             return {"data": {"section": section, "id": getattr(existing, pk_field)}}
         else:
@@ -526,6 +580,8 @@ async def employee_section_save(
             db.add(record)
             db.flush()
             record_id = getattr(record, pk_field)
+            if section == "official":
+                _upsert_bio_link(db, eb_id, section_data.get("emp_code"), section_data.get("bio_metric_id"))
             db.commit()
             return {"data": {"section": section, "id": record_id}}
 
@@ -710,8 +766,9 @@ async def employee_status_update(
 
         user_id = token_data.get("user_id", 0)
 
-        # Validate status_id is a known lifecycle status
-        valid_statuses = set(EMPLOYEE_LIFECYCLE_STATUS.values())
+        # Validate status_id is a known lifecycle status or a standard status
+        # (standard statuses include OPEN=1, e.g. moving a Joined employee back to Open)
+        valid_statuses = set(EMPLOYEE_LIFECYCLE_STATUS.values()) | set(EMPLOYEE_STATUS.values())
         if int(new_status_id) not in valid_statuses:
             raise HTTPException(status_code=400, detail=f"Invalid status_id: {new_status_id}")
 

@@ -753,6 +753,29 @@ select etm.entity_type_id , etm.entity_type_name  from entity_type_mst etm ;
     query = text(sql)
     return query
 
+def get_party_types_with_prefix():
+    sql = """
+SELECT
+  ptm.party_types_mst_id,
+  ptm.party_types_mst_name,
+  ptm.party_types_mst_prefix,
+  ptm.module_id
+FROM party_type_mst ptm;
+"""
+    query = text(sql)
+    return query
+
+def get_city_list():
+    sql = """
+SELECT
+  cm.city_id,
+  cm.city_name,
+  cm.state_id
+FROM city_mst cm;
+"""
+    query = text(sql)
+    return query
+
 def get_party_by_id(party_id: int):
     sql = """
 SELECT  
