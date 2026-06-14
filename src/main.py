@@ -229,10 +229,21 @@ logger = logging.getLogger(__name__)
 @app.on_event("startup")
 async def startup_event():
     logger.info("Application is starting up...")
+    # Automated hourly bio-attendance pipeline (no-op unless BIO_ATT_AUTO_ENABLED).
+    try:
+        from src.hrms.bio_att_auto_pipeline import start_scheduler
+        start_scheduler()
+    except Exception:
+        logger.exception("Failed to start bio_att_auto scheduler")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("Application is shutting down...")
+    try:
+        from src.hrms.bio_att_auto_pipeline import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        logger.exception("Failed to stop bio_att_auto scheduler")
 
 # @asynccontextmanager
 # async def lifespan(app: FastAPI):
