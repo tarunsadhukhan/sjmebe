@@ -57,6 +57,7 @@ from src.juteProcurement.jutePO import router as jute_po_router
 from src.juteProcurement.juteGateEntry import router as jute_gate_entry_router
 from src.juteProcurement.materialInspection import router as jute_material_inspection_router
 from src.juteProcurement.mr import router as jute_mr_router
+from src.juteProcurement.juteMukamRecv import router as jute_mukam_recvd_router
 from src.juteProcurement.juteAgentMap import router as jute_agent_map_router
 from src.juteProcurement.billPass import router as jute_bill_pass_router
 from src.juteProcurement.issue import router as jute_issue_router
@@ -175,6 +176,7 @@ app.include_router(jute_po_router, prefix="/api/jutePO", tags=["jute-procurement
 app.include_router(jute_gate_entry_router, prefix="/api/juteGateEntry", tags=["jute-procurement-gate-entry"])
 app.include_router(jute_material_inspection_router, prefix="/api/juteMaterialInspection", tags=["jute-procurement-material-inspection"])
 app.include_router(jute_mr_router, prefix="/api/juteMR", tags=["jute-procurement-mr"])
+app.include_router(jute_mukam_recvd_router, prefix="/api/juteMukamRecv", tags=["jute-procurement-mukam-recvd"])
 app.include_router(jute_agent_map_router, prefix="/api/juteAgentMap", tags=["jute-procurement-agent-map"])
 app.include_router(jute_bill_pass_router, prefix="/api/juteBillPass", tags=["jute-procurement-bill-pass"])
 app.include_router(jute_issue_router, prefix="/api/juteIssue", tags=["jute-procurement-issue"])
