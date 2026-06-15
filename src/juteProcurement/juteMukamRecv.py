@@ -43,7 +43,7 @@ _RECVD_LIST_SQL = text("""
 _RECVD_BY_NO_SQL = text("""
     SELECT jute_mukam_recvd, recvd_date, party_id, mukam_id,
            gross_weight, tare_weight, `net_weight(10,3)` AS net_weight,
-           quality_id, geo_location, geo_place, remarks,
+           quality_id, geo_location, geo_place, remarks, mukam_photo,
            jute_mukam_recvd_no, update_date_time, updated_by
     FROM jute_mukam_recvd
     WHERE jute_mukam_recvd_no = :recvd_no
@@ -53,15 +53,15 @@ _INSERT_SQL = text("""
     INSERT INTO jute_mukam_recvd
         (recvd_date, party_id, mukam_id, gross_weight, tare_weight,
          `net_weight(10,3)`, quality_id, geo_location, geo_place,
-         updated_by, remarks, jute_mukam_recvd_no)
+         updated_by, remarks, mukam_photo, jute_mukam_recvd_no)
     VALUES
         (:recvd_date, :party_id, :mukam_id, :gross_weight, :tare_weight,
          :net_weight, :quality_id, :geo_location, :geo_place,
-         :updated_by, :remarks, :recvd_no)
+         :updated_by, :remarks, :mukam_photo, :recvd_no)
 """)
 
-# geo_location / geo_place are intentionally NOT updated — they are captured
-# once at entry and shown read-only afterwards.
+# geo_location / geo_place / mukam_photo are intentionally NOT updated — they are
+# captured once at entry and shown read-only afterwards.
 _UPDATE_SQL = text("""
     UPDATE jute_mukam_recvd SET
         recvd_date = :recvd_date,
@@ -110,6 +110,7 @@ def _row_payload(body: dict, updated_by: int) -> dict:
         "geo_location": (body.get("geo_location") or None),
         "geo_place": (body.get("geo_place") or None),
         "remarks": (body.get("remarks") or None),
+        "mukam_photo": (body.get("mukam_photo") or None),
         "updated_by": updated_by,
     }
 
