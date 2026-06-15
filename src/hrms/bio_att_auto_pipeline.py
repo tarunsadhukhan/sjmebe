@@ -42,7 +42,7 @@ import argparse
 import logging
 import os
 import traceback
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -390,6 +390,11 @@ def start_scheduler():
         max_instances=1,
         coalesce=True,
         replace_existing=True,
+        # Fire once right after startup instead of waiting a full interval.
+        # IntervalTrigger otherwise schedules the first run at start+interval, so
+        # every app restart (e.g. dev reload) would lose up to interval_min of
+        # processing. Seeding next_run_time=now closes that gap.
+        next_run_time=datetime.now(),
     )
     scheduler.start()
     _scheduler = scheduler
