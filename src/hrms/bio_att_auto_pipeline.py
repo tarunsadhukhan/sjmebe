@@ -153,6 +153,17 @@ _UPSERT_LAST_ID_SQL = text(
     """
 )
 
+# Heartbeat: bump last_run_at on every tick (even skipped ones) WITHOUT moving
+# the high-water mark, so last_run_at reliably reports "the job is alive" rather
+# than "the last time new data was processed".
+_TOUCH_RUN_AT_SQL = text(
+    """
+    INSERT INTO bio_att_auto_state (branch_id, last_bio_att_id, last_run_at)
+    VALUES (:branch_id, 0, NOW())
+    ON DUPLICATE KEY UPDATE last_run_at = NOW()
+    """
+)
+
 _MAX_BIO_ATT_ID_SQL = text("SELECT MAX(bio_att_id) AS max_id FROM bio_attendance_table")
 
 # MySQL named lock — guarantees a single concurrent run even when the app is
@@ -218,6 +229,19 @@ def _set_last_bio_att_id(db: Session, branch_id: int, last_id: int) -> None:
     db.commit()
 
 
+def _touch_last_run_at(db: Session, branch_id: int) -> None:
+    """Heartbeat — record that the job ran now, without advancing the
+    high-water mark. Best-effort: never let a heartbeat failure abort a run."""
+    try:
+        db.execute(_TOUCH_RUN_AT_SQL, {"branch_id": branch_id})
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 # ── Pipeline core ────────────────────────────────────────────────────────────
 
 def _run_chain_for_date(db: Session, tran_date: str, branch_id: int) -> None:
@@ -266,6 +290,9 @@ def run_once(
         locked = True
 
         _ensure_state_table(db)
+        # Heartbeat first thing inside the lock: even a no-op tick updates
+        # last_run_at so it reflects "job is alive", not "last data processed".
+        _touch_last_run_at(db, branch_id)
         current_max = _get_max_bio_att_id(db)
         if current_max is None:
             log.info("bio_attendance_table is empty for tenant=%s — nothing to do.", tenant)
