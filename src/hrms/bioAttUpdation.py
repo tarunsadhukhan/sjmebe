@@ -1742,6 +1742,7 @@ FINAL_FETCH_SQL = text(
       FROM daily_attendance_process_table
      WHERE attendance_date = :tran_date
        AND processed = 1
+     ORDER BY eb_id, daily_att_proc_id
     """
 )
 
@@ -1805,6 +1806,251 @@ FINAL_INSERT_EBMC_SQL = text(
         (:daily_atten_id, :eb_id, :mc_id, 1)
     """
 )
+
+# ── Final-process: update-in-place reconciliation ───────────────────────────
+# The final process now writes spell + hours straight from
+# daily_attendance_process_table (spell_name / Working_hours / Ot_hours /
+# spell_hours) instead of recomputing them. Existing daily_attendance rows for
+# the date are UPDATED in place (preserving daily_atten_id and any linked
+# daily_ebmc_attendance rows); surplus desired rows are inserted and stale rows
+# removed. Rows are paired per employee in deterministic order
+# (process rows ORDER BY eb_id, daily_att_proc_id ; existing rows by daily_atten_id).
+
+# Existing BIO daily_attendance rows for a date, for the given employees.
+FINAL_SELECT_EXISTING_SQL = text(
+    """
+    SELECT daily_atten_id, eb_id
+      FROM daily_attendance
+     WHERE attendance_date = :tran_date
+       AND eb_id IN :eb_ids
+       AND attendance_source = 'BIO'
+     ORDER BY eb_id, daily_atten_id
+    """
+)
+
+# Update an existing daily_attendance row in place (keeps daily_atten_id).
+FINAL_UPDATE_EXISTING_SQL = text(
+    """
+    UPDATE daily_attendance
+       SET attendance_date       = :attendance_date,
+           attendance_source     = :attendance_source,
+           attendance_type       = :attendance_type,
+           attendance_mark       = 'P',
+           eb_id                 = :eb_id,
+           bio_id                = :bio_id,
+           branch_id             = :branch_id,
+           status_id             = 1,
+           worked_department_id  = :worked_department_id,
+           worked_designation_id = :worked_designation_id,
+           entry_time            = :entry_time,
+           exit_time             = :exit_time,
+           working_hours         = :working_hours,
+           idle_hours            = 0,
+           spell                 = :spell,
+           spell_hours           = :spell_hours,
+           is_active             = 1,
+           update_date_time      = NOW()
+     WHERE daily_atten_id = :daily_atten_id
+    """
+)
+
+# Remove a stale daily_attendance row (and its mc links) that no longer has a
+# corresponding process-table row.
+FINAL_DELETE_STALE_SQL = text(
+    "DELETE FROM daily_attendance WHERE daily_atten_id = :daily_atten_id"
+)
+FINAL_DELETE_EBMC_BY_ATT_SQL = text(
+    "DELETE FROM daily_ebmc_attendance WHERE daily_atten_id = :daily_atten_id"
+)
+
+
+def _build_desired_daily_rows(
+    rows,
+    *,
+    branch_id: int,
+    off_eb_ids,
+    working_att_type: str,
+) -> tuple[dict[int, list[dict]], list[dict], int]:
+    """Translate processed daily_attendance_process_table rows into the desired
+    daily_attendance rows, taking spell + hours straight from the process table.
+
+    Each process row yields up to two desired rows: a working row
+    (attendance_type=`working_att_type`, hours=Working_hours) when Working_hours>0,
+    and an OT row (attendance_type='O', hours=Ot_hours) when Ot_hours>0. The
+    `spell` comes from the process row's `spell_name` verbatim and `spell_hours`
+    from `spell_hours` — no recompute / re-bucketing.
+
+    Returns (desired_by_eb, desired_no_eb, skipped) where desired_by_eb maps
+    eb_id -> ordered list of desired-row dicts. `_dept_id`/`_desig_id` private
+    keys carry the mc-link source and are stripped before SQL execution.
+    """
+    desired_by_eb: dict[int, list[dict]] = {}
+    desired_no_eb: list[dict] = []
+    skipped = 0
+
+    for r in rows:
+        m = r._mapping
+
+        spell = m.get("spell_name")
+        if spell is None or str(spell).strip() == "":
+            # No spell on the process row — cannot place it; skip.
+            skipped += 1
+            continue
+
+        try:
+            wh = float(m.get("Working_hours") or 0)
+        except Exception:
+            wh = 0.0
+        try:
+            ot = float(m.get("Ot_hours") or 0)
+        except Exception:
+            ot = 0.0
+
+        entries: list[tuple[str, float]] = []
+        if wh > 0:
+            entries.append((working_att_type, wh))
+        if ot > 0:
+            entries.append(("O", ot))
+        if not entries:
+            skipped += 1
+            continue
+
+        eb_id_val = m.get("eb_id")
+        emp_off_day = eb_id_val is not None and int(eb_id_val) in off_eb_ids
+
+        for att_type, hours in entries:
+            desired = {
+                "attendance_date":       m.get("attendance_date"),
+                "attendance_source":     m.get("attendance_source") or "BIO",
+                "attendance_type":       "O" if emp_off_day else att_type,
+                "eb_id":                 eb_id_val,
+                "bio_id":                m.get("bio_id"),
+                "branch_id":             branch_id,
+                "worked_department_id":  m.get("dept_id"),
+                "worked_designation_id": m.get("desig_id"),
+                "entry_time":            m.get("check_in"),
+                "exit_time":             m.get("check_out"),
+                "working_hours":         hours,
+                "spell":                 spell,
+                "spell_hours":           m.get("spell_hours"),
+                # private (mc-link source) — stripped before SQL execution.
+                "_dept_id":              m.get("dept_id"),
+                "_desig_id":             m.get("desig_id"),
+            }
+            if eb_id_val is None:
+                desired_no_eb.append(desired)
+            else:
+                desired_by_eb.setdefault(int(eb_id_val), []).append(desired)
+
+    return desired_by_eb, desired_no_eb, skipped
+
+
+def _maybe_insert_ebmc(db: Session, daily_atten_id, eb_id, dept_id, desig_id) -> None:
+    """Insert a daily_ebmc_attendance row iff the employee's last mc entry
+    matches the current dept/desig."""
+    if not (daily_atten_id and eb_id and dept_id and desig_id):
+        return
+    last_ebmc = db.execute(FINAL_LAST_EBMC_SQL, {"eb_id": eb_id}).fetchone()
+    if (
+        last_ebmc is not None
+        and last_ebmc.dept_id is not None
+        and last_ebmc.desig_id is not None
+        and int(last_ebmc.dept_id) == int(dept_id)
+        and int(last_ebmc.desig_id) == int(desig_id)
+    ):
+        db.execute(FINAL_INSERT_EBMC_SQL, {
+            "daily_atten_id": daily_atten_id,
+            "eb_id": eb_id,
+            "mc_id": last_ebmc.mc_id,
+        })
+
+
+def _insert_daily_att_row(db: Session, desired: dict) -> int | None:
+    """Insert one daily_attendance row from a desired-row dict and add its mc
+    link if applicable. Returns the new daily_atten_id."""
+    params = {k: v for k, v in desired.items() if not k.startswith("_")}
+    ins_res = db.execute(FINAL_INSERT_SQL, params)
+    new_id = ins_res.lastrowid
+    _maybe_insert_ebmc(db, new_id, desired.get("eb_id"),
+                       desired.get("_dept_id"), desired.get("_desig_id"))
+    return new_id
+
+
+def _update_daily_att_row(db: Session, daily_atten_id: int, desired: dict) -> None:
+    """Update an existing daily_attendance row in place from a desired-row dict.
+    The mc link is left intact (daily_atten_id is preserved)."""
+    params = {k: v for k, v in desired.items() if not k.startswith("_")}
+    params["daily_atten_id"] = daily_atten_id
+    db.execute(FINAL_UPDATE_EXISTING_SQL, params)
+
+
+def finalize_daily_attendance(
+    db: Session,
+    rows,
+    *,
+    tran_date: str,
+    branch_id: int,
+    off_eb_ids=frozenset(),
+    working_att_type: str = "R",
+) -> dict:
+    """Reconcile daily_attendance for `tran_date` from processed process-table
+    `rows`, taking spell + hours from the process table.
+
+    Existing BIO rows for the date are UPDATED in place (preserving
+    daily_atten_id and linked daily_ebmc_attendance); extra desired rows are
+    inserted and stale rows deleted. Does NOT commit — the caller commits.
+
+    Returns dict(inserted, updated, deleted, skipped).
+    """
+    desired_by_eb, desired_no_eb, skipped = _build_desired_daily_rows(
+        rows, branch_id=branch_id, off_eb_ids=off_eb_ids,
+        working_att_type=working_att_type,
+    )
+
+    existing_by_eb: dict[int, list[int]] = {}
+    eb_ids = list(desired_by_eb.keys())
+    if eb_ids:
+        ex_rows = db.execute(
+            FINAL_SELECT_EXISTING_SQL,
+            {"tran_date": tran_date, "eb_ids": tuple(eb_ids)},
+        ).fetchall()
+        for er in ex_rows:
+            em = er._mapping
+            existing_by_eb.setdefault(int(em["eb_id"]), []).append(
+                int(em["daily_atten_id"])
+            )
+
+    inserted = updated = deleted = 0
+
+    # Rows with no eb_id can't be matched — always insert fresh.
+    for desired in desired_no_eb:
+        _insert_daily_att_row(db, desired)
+        inserted += 1
+
+    for eb_id, desired_rows in desired_by_eb.items():
+        existing_ids = existing_by_eb.get(eb_id, [])
+        n = max(len(desired_rows), len(existing_ids))
+        for i in range(n):
+            if i < len(desired_rows) and i < len(existing_ids):
+                _update_daily_att_row(db, existing_ids[i], desired_rows[i])
+                updated += 1
+            elif i < len(desired_rows):
+                _insert_daily_att_row(db, desired_rows[i])
+                inserted += 1
+            else:
+                # Stale row — no longer produced by the process table.
+                db.execute(FINAL_DELETE_EBMC_BY_ATT_SQL,
+                           {"daily_atten_id": existing_ids[i]})
+                db.execute(FINAL_DELETE_STALE_SQL,
+                           {"daily_atten_id": existing_ids[i]})
+                deleted += 1
+
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "deleted": deleted,
+        "skipped": skipped,
+    }
 
 
 def _resolve_spell_by_time(check_in, check_out, ot_hours) -> str | None:
@@ -1897,120 +2143,22 @@ async def bio_att_final_process(
         rows = db.execute(FINAL_FETCH_SQL, {"tran_date": tran_date}).fetchall()
         print(f"[bio_att_final_process] fetched {len(rows)} row(s)", flush=True)
 
-        # ── Delete existing daily_attendance rows for the same bio_ids ──────
-        bio_ids = [r._mapping["bio_id"] for r in rows if r._mapping.get("bio_id") is not None]
-        deleted_existing = 0
-        if bio_ids:
-            del_result = db.execute(FINAL_DELETE_EXISTING_SQL, {"bio_ids": tuple(bio_ids)})
-            deleted_existing = del_result.rowcount
-            print(
-                f"[bio_att_final_process] deleted {deleted_existing} existing "
-                f"daily_attendance row(s) for {len(bio_ids)} bio_id(s)",
-                flush=True,
-            )
-
-        inserted = 0
-        skipped = 0
-        for r in rows:
-            m = r._mapping
-            spell = _resolve_spell_by_time(
-                m.get("check_in"), m.get("check_out"), m.get("Ot_hours")
-            )
-            if spell is None:
-                skipped += 1
-                print(
-                    f"[bio_att_final_process] skip eb_id={m.get('eb_id')} "
-                    f"check_in={m.get('check_in')} check_out={m.get('check_out')} "
-                    f"ot={m.get('Ot_hours')} {spell} (out of A/B window)",
-                    flush=True,
-                )
-                continue
-
-            base_params = {
-                "attendance_date": m.get("attendance_date"),
-                "attendance_source": m.get("attendance_source") or "BIO",
-                "eb_id": m.get("eb_id"),
-                "bio_id": m.get("bio_id"),
-                "branch_id": branch_id,
-                "worked_department_id": m.get("dept_id"),
-                "worked_designation_id": m.get("desig_id"),
-                "entry_time": m.get("check_in"),
-                "exit_time": m.get("check_out"),
-                "spell": spell,
-                "spell_hours": m.get("spell_hours"),
-            }
-
-            try:
-                wh = float(m.get("Working_hours") or 0)
-            except Exception:
-                wh = 0.0
-            try:
-                ot = float(m.get("Ot_hours") or 0)
-            except Exception:
-                ot = 0.0
-
-            inserts: list[tuple[str, float]] = []
-            if wh > 0 and ot > 0:
-                inserts.append(("R", wh))
-                inserts.append(("O", ot))
-            elif wh > 0:
-                inserts.append(("R", wh))
-            elif ot > 0:
-                inserts.append(("O", ot))
-            else:
-                skipped += 1
-                print(
-                    f"[bio_att_final_process] skip eb_id={m.get('eb_id')} "
-                    f"working_hours=0 ot_hours=0",
-                    flush=True,
-                )
-                continue
-
-            eb_id_val = m.get("eb_id")
-            emp_off_day = (
-                eb_id_val is not None and int(eb_id_val) in off_eb_ids
-            )
-            for att_type, hours in inserts:
-                effective_att_type = "O" if emp_off_day else att_type
-                params = {
-                    **base_params,
-                    "attendance_type": effective_att_type,
-                    "working_hours": hours,
-                }
-                _log_sql(
-                    f"FINAL_INSERT_SQL [eb_id={m.get('eb_id')} spell={spell} type={effective_att_type}]",
-                    FINAL_INSERT_SQL, params,
-                )
-                ins_res = db.execute(FINAL_INSERT_SQL, params)
-                inserted += 1
-
-                # ── Insert daily_ebmc_attendance if last mc matches dept/desig ──
-                new_daily_atten_id = ins_res.lastrowid
-                eb_id_val = m.get("eb_id")
-                curr_dept  = m.get("dept_id")
-                curr_desig = m.get("desig_id")
-                if new_daily_atten_id and eb_id_val and curr_dept and curr_desig:
-                    last_ebmc = db.execute(
-                        FINAL_LAST_EBMC_SQL, {"eb_id": eb_id_val}
-                    ).fetchone()
-                    if (
-                        last_ebmc is not None
-                        and last_ebmc.dept_id  is not None
-                        and last_ebmc.desig_id is not None
-                        and int(last_ebmc.dept_id)  == int(curr_dept)
-                        and int(last_ebmc.desig_id) == int(curr_desig)
-                    ):
-                        db.execute(FINAL_INSERT_EBMC_SQL, {
-                            "daily_atten_id": new_daily_atten_id,
-                            "eb_id": eb_id_val,
-                            "mc_id": last_ebmc.mc_id,
-                        })
-                        print(
-                            f"[bio_att_final_process] ebmc inserted "
-                            f"eb_id={eb_id_val} mc_id={last_ebmc.mc_id} "
-                            f"daily_atten_id={new_daily_atten_id}",
-                            flush=True,
-                        )
+        # Write spell + hours straight from the process table; UPDATE existing
+        # daily_attendance rows in place (preserving daily_atten_id / mc links),
+        # insert surplus rows, remove stale ones.
+        stats = finalize_daily_attendance(
+            db, rows,
+            tran_date=tran_date,
+            branch_id=branch_id,
+            off_eb_ids=off_eb_ids,
+            working_att_type="R",
+        )
+        print(
+            f"[bio_att_final_process] {tran_date} -> inserted={stats['inserted']} "
+            f"updated={stats['updated']} deleted={stats['deleted']} "
+            f"skipped={stats['skipped']}",
+            flush=True,
+        )
 
         _log_sql("FINAL_MARK_PROCESSED_SQL", FINAL_MARK_PROCESSED_SQL, {"tran_date": tran_date})
         db.execute(FINAL_MARK_PROCESSED_SQL, {"tran_date": tran_date})
@@ -2018,13 +2166,15 @@ async def bio_att_final_process(
 
         return {
             "message": (
-                f"Final processed {inserted} row(s) for {tran_date} "
-                f"(skipped {skipped} out-of-window, deleted {deleted_existing} existing)."
+                f"Final processed {tran_date}: inserted {stats['inserted']}, "
+                f"updated {stats['updated']}, deleted {stats['deleted']} "
+                f"(skipped {stats['skipped']})."
             ),
             "tran_date": tran_date,
-            "inserted": inserted,
-            "skipped": skipped,
-            "deleted_existing": deleted_existing,
+            "inserted": stats["inserted"],
+            "updated": stats["updated"],
+            "deleted": stats["deleted"],
+            "skipped": stats["skipped"],
         }
     except HTTPException:
         raise

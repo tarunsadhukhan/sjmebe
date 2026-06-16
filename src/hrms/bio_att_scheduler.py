@@ -76,15 +76,10 @@ from src.hrms.bioAttUpdation import (
     IS_OFF_DAY_SQL,
     DELETE_DAY_ROWS_SQL,
     _process_etrack_day,
-    _bucket_hours,
     # Step 3 SQL / helpers
     FINAL_FETCH_SQL,
-    FINAL_INSERT_SQL,
     FINAL_MARK_PROCESSED_SQL,
-    FINAL_DELETE_EXISTING_SQL,
-    FINAL_LAST_EBMC_SQL,
-    FINAL_INSERT_EBMC_SQL,
-    _resolve_spell_by_time,
+    finalize_daily_attendance,
 )
 
 log = logging.getLogger("bio_att_scheduler")
@@ -420,7 +415,11 @@ def step3_final_process(
     branch_id: int,
     dry_run: bool,
 ) -> dict:
-    """Copy processed=1 rows into daily_attendance (delete by bio_id first)."""
+    """Write processed=1 rows into daily_attendance, taking spell + hours
+    straight from daily_attendance_process_table (spell_name / Working_hours /
+    Ot_hours / spell_hours). Existing daily_attendance rows for the date are
+    UPDATED in place (preserving daily_atten_id and linked daily_ebmc_attendance
+    rows); surplus rows are inserted and stale rows removed."""
 
     log.info("Step 3 | final_process for %s …", tran_date)
 
@@ -429,113 +428,18 @@ def step3_final_process(
 
     if dry_run:
         log.info("Step 3 | dry-run: skipping DB writes for %s", tran_date)
-        return {"inserted": 0, "skipped": 0, "deleted_existing": 0}
+        return {"inserted": 0, "updated": 0, "deleted": 0, "skipped": 0}
 
-    # Delete existing daily_attendance rows by bio_id
-    bio_ids = [r._mapping["bio_id"] for r in rows if r._mapping.get("bio_id") is not None]
-    deleted_existing = 0
-    if bio_ids:
-        del_res = db.execute(FINAL_DELETE_EXISTING_SQL, {"bio_ids": tuple(bio_ids)})
-        deleted_existing = del_res.rowcount
-        log.info(
-            "Step 3 | %s -> deleted %d existing daily_attendance row(s) "
-            "for %d bio_id(s)",
-            tran_date, deleted_existing, len(bio_ids),
-        )
-
-    inserted = 0
-    skipped = 0
-
-    for r in rows:
-        m = r._mapping
-        spell = _resolve_spell_by_time(
-            m.get("check_in"), m.get("check_out"), m.get("Ot_hours")
-        )
-        if spell is None:
-            skipped += 1
-            continue
-
-        try:
-            wh = float(m.get("Working_hours") or 0)
-        except Exception:
-            wh = 0.0
-        try:
-            ot = float(m.get("Ot_hours") or 0)
-        except Exception:
-            ot = 0.0
-
-        # Bucket hours: >=7 -> 8, [3, 7) -> 4, <3 -> 0.
-        wh = _bucket_hours(wh)
-        ot = _bucket_hours(ot)
-
-        inserts: list[tuple[str, float]] = []
-        if wh > 0 and ot > 0:
-            inserts.append(("P", wh))
-            inserts.append(("O", ot))
-        elif wh > 0:
-            inserts.append(("P", wh))
-        elif ot > 0:
-            inserts.append(("O", ot))
-        else:
-            skipped += 1
-            continue
-
-        base = {
-            "attendance_date":   m.get("attendance_date"),
-            "attendance_source": m.get("attendance_source") or "BIO",
-            "eb_id":             m.get("eb_id"),
-            "bio_id":            m.get("bio_id"),
-            "branch_id":         branch_id,
-            "worked_department_id": m.get("dept_id"),
-            "worked_designation_id": m.get("desig_id"),
-            "entry_time":        m.get("check_in"),
-            "exit_time":         m.get("check_out"),
-            "spell":             spell,
-            "spell_hours":       m.get("spell_hours"),
-        }
-
-        for att_type, hours in inserts:
-            ins_res = db.execute(FINAL_INSERT_SQL, {
-                **base,
-                "attendance_type": att_type,
-                "working_hours": hours,
-            })
-            inserted += 1
-
-            # Insert daily_ebmc_attendance if last mc matches dept/desig
-            new_daily_atten_id = ins_res.lastrowid
-            eb_id_val  = m.get("eb_id")
-            curr_dept  = m.get("dept_id")
-            curr_desig = m.get("desig_id")
-            if new_daily_atten_id and eb_id_val and curr_dept and curr_desig:
-                last_ebmc = db.execute(
-                    FINAL_LAST_EBMC_SQL, {"eb_id": eb_id_val}
-                ).fetchone()
-                if (
-                    last_ebmc is not None
-                    and last_ebmc.dept_id  is not None
-                    and last_ebmc.desig_id is not None
-                    and int(last_ebmc.dept_id)  == int(curr_dept)
-                    and int(last_ebmc.desig_id) == int(curr_desig)
-                ):
-                    db.execute(FINAL_INSERT_EBMC_SQL, {
-                        "daily_atten_id": new_daily_atten_id,
-                        "eb_id": eb_id_val,
-                        "mc_id": last_ebmc.mc_id,
-                    })
-                    log.debug(
-                        "Step 3 | ebmc inserted eb_id=%s mc_id=%s daily_atten_id=%s",
-                        eb_id_val, last_ebmc.mc_id, new_daily_atten_id,
-                    )
+    result = finalize_daily_attendance(
+        db, rows,
+        tran_date=tran_date,
+        branch_id=branch_id,
+        working_att_type="P",
+    )
 
     db.execute(FINAL_MARK_PROCESSED_SQL, {"tran_date": tran_date})
     db.commit()
 
-    result = {
-        "inserted": inserted,
-        "skipped": skipped,
-        "deleted_existing": deleted_existing,
-    }
     log.info("Step 3 | %s result: %s", tran_date, result)
     return result
 
