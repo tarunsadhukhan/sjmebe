@@ -1076,6 +1076,296 @@ async def bio_att_max_log_id(
 
 
 # =============================================================================
+# Manual bio-attendance entry  (manual_auto = 1)
+#   Page: dashboardportal/hrms/bioAttendance
+#
+#   HR enters a single missed punch (employee + log_date + In/Out). Everything
+#   else is resolved server-side so the manual row matches a device-sourced row:
+#     bio_id          <- tbl_master_bio_link_mst (match_type='E', master_id=eb_id)
+#     emp_code/anme   <- hrms_ed_official_details (+ personal details), active=1
+#     dept_id/desig_id<- sub_dept_id / designation_id from official details
+#     bio_att_log_id  <- global MAX(bio_att_log_id) + 1
+#     device_id       <- 22 for 'in', else 14   (matches the etrack convention)
+#     device_direction<- 'in' / 'out' (lowercased)
+#     manual_auto     <- 1
+# =============================================================================
+
+@router.get("/bio_att_emp_search")
+async def bio_att_emp_search(
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    token_data: dict = Depends(get_current_user_with_refresh),
+):
+    """Active-employee typeahead for the manual bio-attendance page.
+
+    Query params: co_id (required), branch_id (required, csv allowed),
+    search (optional). Returns up to 20 {eb_id, emp_code, emp_name}.
+    """
+    co_id = request.query_params.get("co_id")
+    if not co_id:
+        raise HTTPException(status_code=400, detail="co_id is required")
+    raw_branch_id = request.query_params.get("branch_id")
+    if not raw_branch_id:
+        raise HTTPException(status_code=400, detail="branch_id is required")
+    try:
+        branch_ids = [int(b) for b in raw_branch_id.split(",") if b.strip()]
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid branch_id format")
+    if not branch_ids:
+        raise HTTPException(status_code=400, detail="branch_id is required")
+
+    search_raw = (request.query_params.get("search") or "").strip()
+    params: dict = {"search": f"%{search_raw}%" if search_raw else None}
+    branch_in = ", ".join(str(b) for b in branch_ids)  # validated ints — safe
+
+    try:
+        rows = db.execute(
+            text(
+                f"""
+                SELECT o.eb_id,
+                       o.emp_code,
+                       TRIM(CONCAT_WS(' ', p.first_name,
+                                           NULLIF(p.middle_name, ''),
+                                           NULLIF(p.last_name, ''))) AS emp_name
+                FROM hrms_ed_official_details o
+                LEFT JOIN hrms_ed_personal_details p ON p.eb_id = o.eb_id
+                WHERE o.active = 1
+                  AND o.branch_id IN ({branch_in})
+                  AND (:search IS NULL
+                       OR o.emp_code LIKE :search
+                       OR p.first_name LIKE :search
+                       OR p.last_name LIKE :search
+                       OR CONCAT_WS(' ', p.first_name, p.last_name) LIKE :search)
+                ORDER BY o.emp_code
+                LIMIT 20
+                """
+            ),
+            params,
+        ).fetchall()
+        return {"data": [dict(r._mapping) for r in rows]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bio_att_manual_list")
+async def bio_att_manual_list(
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    token_data: dict = Depends(get_current_user_with_refresh),
+):
+    """Paginated listing of manually-entered punches (manual_auto = 1).
+
+    Query params: co_id (required), branch_id (required, csv allowed),
+    page, limit, search (emp_code / name / direction).
+    """
+    co_id = request.query_params.get("co_id")
+    if not co_id:
+        raise HTTPException(status_code=400, detail="co_id is required")
+    raw_branch_id = request.query_params.get("branch_id")
+    if not raw_branch_id:
+        raise HTTPException(status_code=400, detail="branch_id is required")
+    try:
+        branch_ids = [int(b) for b in raw_branch_id.split(",") if b.strip()]
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid branch_id format")
+    if not branch_ids:
+        raise HTTPException(status_code=400, detail="branch_id is required")
+
+    page = int(request.query_params.get("page", 1))
+    limit = int(request.query_params.get("limit", 10))
+    offset = max(page - 1, 0) * limit
+    search = (request.query_params.get("search") or "").strip()
+    branch_in = ", ".join(str(b) for b in branch_ids)  # validated ints — safe
+
+    params: dict = {"limit": limit, "offset": offset}
+    clauses = ["b.manual_auto = 1", f"o.branch_id IN ({branch_in})"]
+    if search:
+        clauses.append(
+            "(b.emp_code LIKE :s OR b.emp_anme LIKE :s OR b.device_direction LIKE :s)"
+        )
+        params["s"] = f"%{search}%"
+    where = " WHERE " + " AND ".join(clauses)
+
+    try:
+        rows = db.execute(
+            text(
+                f"""
+                SELECT b.bio_att_id, b.bio_att_log_id, b.emp_code, b.emp_anme,
+                       b.bio_id, b.log_date, b.device_direction, b.device_id,
+                       b.eb_id, b.dept_id, b.desig_id
+                FROM bio_attendance_table b
+                JOIN hrms_ed_official_details o ON o.eb_id = b.eb_id
+                {where}
+                ORDER BY b.log_date DESC, b.bio_att_id DESC
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            params,
+        ).fetchall()
+
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+        total = db.execute(
+            text(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM bio_attendance_table b
+                JOIN hrms_ed_official_details o ON o.eb_id = b.eb_id
+                {where}
+                """
+            ),
+            count_params,
+        ).fetchone()
+
+        data = []
+        for r in rows:
+            d = dict(r._mapping)
+            ld = d.get("log_date")
+            if isinstance(ld, datetime):
+                d["log_date"] = ld.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(ld, date):
+                d["log_date"] = ld.isoformat()
+            data.append(d)
+
+        return {
+            "data": data,
+            "total": int(total.cnt) if total else 0,
+            "page": page,
+            "limit": limit,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/bio_att_manual_create")
+async def bio_att_manual_create(
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    token_data: dict = Depends(get_current_user_with_refresh),
+):
+    """Insert a single manual punch into bio_attendance_table.
+
+    Body: co_id (required), branch_id (required), eb_id (required),
+          log_date (required, 'YYYY-MM-DD HH:MM[:SS]' or ISO), direction ('In'/'Out').
+
+    All identity/bio fields are resolved server-side from the masters.
+    """
+    body = await request.json()
+    co_id = body.get("co_id")
+    if not co_id:
+        raise HTTPException(status_code=400, detail="co_id is required")
+
+    try:
+        eb_id = int(body.get("eb_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="eb_id is required")
+
+    try:
+        branch_id = int(body.get("branch_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="branch_id is required")
+
+    direction_raw = (body.get("direction") or body.get("device_direction") or "").strip().lower()
+    if direction_raw not in ("in", "out"):
+        raise HTTPException(status_code=400, detail="direction must be 'In' or 'Out'")
+    device_id = 22 if direction_raw == "in" else 14
+
+    # Parse log_date — accept 'YYYY-MM-DDTHH:MM', 'YYYY-MM-DD HH:MM:SS', date-only.
+    log_raw = (body.get("log_date") or "").strip()
+    if not log_raw:
+        raise HTTPException(status_code=400, detail="log_date is required")
+    try:
+        log_dt = datetime.fromisoformat(log_raw.replace("T", " "))
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="log_date must be 'YYYY-MM-DD HH:MM:SS' or ISO format",
+        )
+
+    try:
+        # Resolve employee identity (active, in this branch). Name/dept/desig
+        # come from the employee master.
+        emp = db.execute(
+            text(
+                """
+                SELECT o.emp_code,
+                       o.sub_dept_id   AS dept_id,
+                       o.designation_id AS desig_id,
+                       TRIM(CONCAT_WS(' ', p.first_name,
+                                           NULLIF(p.middle_name, ''),
+                                           NULLIF(p.last_name, ''))) AS emp_anme
+                FROM hrms_ed_official_details o
+                LEFT JOIN hrms_ed_personal_details p ON p.eb_id = o.eb_id
+                WHERE o.eb_id = :eb_id AND o.active = 1 AND o.branch_id = :branch_id
+                LIMIT 1
+                """
+            ),
+            {"eb_id": eb_id, "branch_id": branch_id},
+        ).mappings().first()
+        if not emp:
+            raise HTTPException(
+                status_code=400,
+                detail="Active employee not found for this eb_id / branch",
+            )
+
+        # emp_code (master_data) and bio_id (bio_dev_id) come from the 'E' link
+        # master. Fall back to the employee-master emp_code if no link row exists.
+        link = db.execute(
+            text(
+                "SELECT master_data, bio_dev_id FROM tbl_master_bio_link_mst "
+                "WHERE match_type = 'E' AND master_id = :eb_id LIMIT 1"
+            ),
+            {"eb_id": eb_id},
+        ).mappings().first()
+        bio_id = link["bio_dev_id"] if link and link["bio_dev_id"] is not None else None
+        emp_code = (link["master_data"] if link and link["master_data"] else None) or emp["emp_code"]
+
+        params = {
+            "emp_code": emp_code,
+            "emp_anme": emp["emp_anme"],
+            "bio_id": bio_id,
+            "log_date": log_dt,
+            "device_direction": direction_raw,
+            "eb_id": eb_id,
+            "dept_id": emp["dept_id"],
+            "desig_id": emp["desig_id"],
+            "device_id": device_id,
+        }
+
+        # bio_att_log_id = global MAX + 1, computed in a derived table so MySQL
+        # allows referencing the target table inside INSERT ... SELECT.
+        db.execute(
+            text(
+                """
+                INSERT INTO bio_attendance_table
+                    (bio_att_log_id, emp_code, emp_anme, bio_id, log_date,
+                     device_direction, eb_id, dept_id, desig_id, device_id,
+                     manual_auto)
+                SELECT m.next_id, :emp_code, :emp_anme, :bio_id, :log_date,
+                       :device_direction, :eb_id, :dept_id, :desig_id, :device_id,
+                       1
+                FROM (SELECT COALESCE(MAX(bio_att_log_id), 0) + 1 AS next_id
+                      FROM bio_attendance_table) AS m
+                """
+            ),
+            params,
+        )
+        db.commit()
+
+        return {
+            "message": "Manual bio-attendance entry saved",
+            "bio_id_resolved": bio_id is not None,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
 # Bio-attendance -> daily_attendance_process_table  (Process button)
 # =============================================================================
 #
@@ -3050,6 +3340,7 @@ _CREATE_DAILY_BASIC_SQL = text(
         actual_out          DATETIME  NULL,
         work_dur_minutes    INT       NOT NULL DEFAULT 0,
         ot_minutes          INT       NOT NULL DEFAULT 0,
+        break_minutes       INT       NOT NULL DEFAULT 0,
         total_dur_minutes   INT       NOT NULL DEFAULT 0,
         late_by_minutes     INT       NOT NULL DEFAULT 0,
         early_going_minutes INT       NOT NULL DEFAULT 0,
@@ -3065,17 +3356,27 @@ _DELETE_DAILY_BASIC_SQL = text(
     "DELETE FROM daily_attendance_basic WHERE tran_date = :tran_date"
 )
 
+# Defensive migration: add break_minutes to a daily_attendance_basic that was
+# created before this column existed. CREATE TABLE IF NOT EXISTS won't add it.
+# IF NOT EXISTS on ADD COLUMN is MySQL 8.0.29+/MariaDB 10.0+; failures are
+# swallowed by the caller (column already present, or older server).
+_ADD_BREAK_COL_SQL = text(
+    "ALTER TABLE daily_attendance_basic "
+    "ADD COLUMN IF NOT EXISTS break_minutes INT NOT NULL DEFAULT 0 "
+    "AFTER ot_minutes"
+)
+
 _INSERT_DAILY_BASIC_SQL = text(
     """
     INSERT INTO daily_attendance_basic
         (eb_id, emp_code, bio_id, dept_id, desig_id, tran_date, shift,
          sched_in_time, sched_out_time, actual_in, actual_out,
-         work_dur_minutes, ot_minutes, total_dur_minutes,
+         work_dur_minutes, ot_minutes, break_minutes, total_dur_minutes,
          late_by_minutes, early_going_minutes, status, punch_records)
     VALUES
         (:eb_id, :emp_code, :bio_id, :dept_id, :desig_id, :tran_date, :shift,
          :sched_in_time, :sched_out_time, :actual_in, :actual_out,
-         :work_dur_minutes, :ot_minutes, :total_dur_minutes,
+         :work_dur_minutes, :ot_minutes, :break_minutes, :total_dur_minutes,
          :late_by_minutes, :early_going_minutes, :status, :punch_records)
     """
 )
@@ -3235,6 +3536,33 @@ _MARK_LAST_OUT_NIGHT_SQL = text(
 )
 
 
+def _split_worked_break_secs(
+    punch_secs: list[int], first_sec: int, last_sec: int
+) -> tuple[int, int]:
+    """Split the span [first_sec, last_sec] into worked vs break seconds.
+
+    `first_sec` is the marked first-IN and `last_sec` the marked last-OUT
+    (both reliable). Punches strictly between them come in (OUT, IN) break
+    pairs — the employee punches OUT to leave, then IN to return — so each
+    such pair's gap is break time and worked = span − breaks.
+
+    A trailing unpaired intermediate punch (odd count → a missing break-out or
+    break-in) is ignored: no break is subtracted for it, degrading to the
+    plain-span result rather than guessing.
+
+    Returns ``(worked_secs, break_secs)``.
+    """
+    total_secs = max(0, last_sec - first_sec)
+    mid = sorted(s for s in punch_secs if first_sec < s < last_sec)
+    break_secs = 0
+    j = 0
+    while j + 1 < len(mid):  # pair (OUT, IN); drop a trailing unpaired punch
+        break_secs += mid[j + 1] - mid[j]
+        j += 2
+    break_secs = min(break_secs, total_secs)
+    return total_secs - break_secs, break_secs
+
+
 def _process_bprocess_day(
     db: Session,
     *,
@@ -3262,6 +3590,11 @@ def _process_bprocess_day(
 
     # Ensure target table exists; wipe rows for this tran_date for re-run.
     db.execute(_CREATE_DAILY_BASIC_SQL)
+    # Best-effort: add break_minutes to tables created before it existed.
+    try:
+        db.execute(_ADD_BREAK_COL_SQL)
+    except Exception:
+        db.rollback()
     db.execute(_DELETE_DAILY_BASIC_SQL, {"tran_date": tran_date})
 
     rows = db.execute(
@@ -3360,15 +3693,27 @@ def _process_bprocess_day(
 
         total_secs = max(0, last_sec - first_sec)
 
-        # eSSL Work/OT split.
+        # ---- Break-aware worked time ----
+        # Punches between the first-IN and last-OUT come in (OUT, IN) break
+        # pairs; subtract each gap as break time. See _split_worked_break_secs.
+        # Example: 05:54 IN, 13:55 OUT, 18:03 IN, 21:54 OUT → break 13:55→18:03,
+        # worked = 16h − 4.13h = 11.85h (8h work + 3.85h OT).
+        punch_secs = [_to_seconds(p[1]) for p in day0]
+        if crosses_midnight or shift == "C":
+            punch_secs.extend(_to_seconds(p[1]) + 24 * 3600 for p in day1)
+        worked_secs, break_secs = _split_worked_break_secs(
+            punch_secs, first_sec, last_sec
+        )
+
+        # eSSL Work/OT split — applied to the break-excluded worked time.
         if no_out_punch:
             # No OUT punch — use sched_out as boundary; whole span is Work
             # (no OT credit because there's no actual out-time to verify).
-            work_secs = total_secs
+            work_secs = worked_secs
             ot_secs   = 0
         else:
-            work_secs = min(_REGULAR_WORK_SECONDS, total_secs)
-            ot_secs   = max(0, total_secs - _REGULAR_WORK_SECONDS)
+            work_secs = min(_REGULAR_WORK_SECONDS, worked_secs)
+            ot_secs   = max(0, worked_secs - _REGULAR_WORK_SECONDS)
 
         late_by_secs       = max(0, first_sec - sched_in_sec)
         early_going_secs   = (
@@ -3435,6 +3780,7 @@ def _process_bprocess_day(
                 "actual_out":          last_log_date,
                 "work_dur_minutes":    work_secs // 60,
                 "ot_minutes":          ot_secs // 60,
+                "break_minutes":       break_secs // 60,
                 "total_dur_minutes":   total_secs // 60,
                 "late_by_minutes":     late_by_secs // 60,
                 "early_going_minutes": early_going_secs // 60,
