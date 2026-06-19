@@ -432,6 +432,7 @@ def start_scheduler():
     return scheduler
 
 
+
 def stop_scheduler() -> None:
     """Shut the scheduler down (called on app shutdown)."""
     global _scheduler
