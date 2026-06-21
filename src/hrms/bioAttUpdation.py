@@ -3482,6 +3482,50 @@ _MARK_FIRST_IN_SQL = text(
     """
 )
 
+# Step 2b — rescue first IN when the device mislabels EVERY punch of an
+# employee's day as 'out' (so Step 2 found no 'in' candidate and the day would be
+# silently dropped). For each employee with NO 'in' punch on tran_date, mark
+# their earliest punch that is NOT a carried-over night-shift exit as 'in'. The
+# night-exit window ([00:00..06:00] for someone whose previous day started after
+# 21:00) is excluded so a night worker's morning exit isn't mistaken for today's
+# IN. Employees who already have any 'in' are untouched — normal days are
+# unaffected; this only rescues the all-'out' case.
+_MARK_RESCUE_FIRST_IN_SQL = text(
+    """
+    UPDATE bio_attendance_table b
+    JOIN (
+        SELECT t.eb_id, MIN(t.log_date) AS edge_log
+        FROM bio_attendance_table t
+        LEFT JOIN (
+            SELECT eb_id, MIN(log_date) AS y_first
+            FROM bio_attendance_table
+            WHERE eb_id IS NOT NULL
+              AND DATE(log_date) = DATE_SUB(:tran_date, INTERVAL 1 DAY)
+            GROUP BY eb_id
+        ) y ON t.eb_id = y.eb_id
+        WHERE DATE(t.log_date) = :tran_date
+          AND t.eb_id IS NOT NULL
+          AND NOT (
+                y.y_first IS NOT NULL
+                AND HOUR(y.y_first) > 21
+                AND TIME(t.log_date) <= '06:00:00'
+          )
+          AND t.eb_id NOT IN (
+                SELECT eb_id FROM (
+                    SELECT DISTINCT eb_id
+                    FROM bio_attendance_table
+                    WHERE DATE(log_date) = :tran_date
+                      AND eb_id IS NOT NULL
+                      AND LOWER(device_direction) = 'in'
+                ) have_in
+          )
+        GROUP BY t.eb_id
+    ) m ON b.eb_id = m.eb_id AND b.log_date = m.edge_log
+    SET b.device_direction = 'in'
+    WHERE DATE(b.log_date) = :tran_date
+    """
+)
+
 # Step 3 — day-shift OUT: last punch on tran_date when the first IN's hour
 # is <= 21. The first-IN row itself is excluded so a single-punch day stays
 # as 'in' rather than being flipped to 'out'.
@@ -3585,6 +3629,9 @@ def _process_bprocess_day(
     #   4. Mark night-shift OUT on tran_date+1 (when first IN > 21).
     db.execute(_MARK_PRIOR_NIGHT_OUT_SQL, {"tran_date": tran_date})
     db.execute(_MARK_FIRST_IN_SQL, {"tran_date": tran_date})
+    # Rescue: when the device labelled every punch 'out', mark the earliest
+    # non-night-exit punch as the IN so the day still produces attendance.
+    db.execute(_MARK_RESCUE_FIRST_IN_SQL, {"tran_date": tran_date})
     db.execute(_MARK_LAST_OUT_DAY_SQL, {"tran_date": tran_date})
     db.execute(_MARK_LAST_OUT_NIGHT_SQL, {"tran_date": tran_date})
 
@@ -4056,16 +4103,16 @@ def _etrack_resolve_and_process(db: Session, tran_date: str) -> dict:
     }
 
 
-def etrack_process_d_core(db: Session, tran_date: str) -> dict:
-    """Etrack Process (D) core. Runs the three pre-steps on bio_attendance_table
-    then the shared resolve + process. Shared by the /bio_att_etrack_process_d
-    route and the automated pipeline (bio_att_auto_pipeline).
+def etrack_process_d_prepare(db: Session) -> dict:
+    """Table-global Etrack pre-steps (0/0b/0c) that do NOT depend on any single
+    date. Safe — and cheaper — to run once per pipeline pass rather than once per
+    date (each is a full-table UPDATE on bio_attendance_table):
 
       0.  emp_code      <- tbl_master_bio_link_mst.master_data
       0b. bio_att_log_id <- generated 500000+ sequence where blank (NULL or 0).
       0c. device_id      <- 22 when device_direction='in', else 14.
 
-    Returns the resolve/process dict plus the three pre-step row counts.
+    Returns the three pre-step row counts.
     """
     # ── Step 0: back-fill emp_code from link master (bio_id -> emp_code) ─
     empcode_res = db.execute(_ETRACK_PROC_EMPCODE_UPDATE_SQL)
@@ -4092,14 +4139,39 @@ def etrack_process_d_core(db: Session, tran_date: str) -> dict:
     device_id_updated = int(device_id_res.rowcount or 0)
     db.commit()
 
-    # Resolve eb_id / dept_id / desig_id, then build the day's spell rows.
-    core = _etrack_resolve_and_process(db, tran_date)
     return {
         "emp_code_updated": emp_code_updated,
         "bio_att_log_id_filled": bio_att_log_id_filled,
         "device_id_updated": device_id_updated,
-        **core,
     }
+
+
+def etrack_process_d_core(
+    db: Session, tran_date: str, *, run_prepare: bool = True
+) -> dict:
+    """Etrack Process (D) core. Runs the three pre-steps on bio_attendance_table
+    then the shared resolve + process. Shared by the /bio_att_etrack_process_d
+    route and the automated pipeline (bio_att_auto_pipeline).
+
+    The pre-steps are table-global (date-independent). Pass run_prepare=False when
+    the caller has already run etrack_process_d_prepare once for the whole pass
+    (the automated pipeline does this) so they aren't repeated per date.
+
+    Returns the resolve/process dict plus the three pre-step row counts.
+    """
+    prep = (
+        etrack_process_d_prepare(db)
+        if run_prepare
+        else {
+            "emp_code_updated": 0,
+            "bio_att_log_id_filled": 0,
+            "device_id_updated": 0,
+        }
+    )
+
+    # Resolve eb_id / dept_id / desig_id, then build the day's spell rows.
+    core = _etrack_resolve_and_process(db, tran_date)
+    return {**prep, **core}
 
 
 def bprocess_core(db: Session, tran_date: str) -> dict:

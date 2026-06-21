@@ -7,7 +7,11 @@ These cover the two decisions that drive correctness and don't need a DB:
 
 from datetime import date
 
-from src.hrms.bio_att_auto_pipeline import compute_dates_to_process, should_skip
+from src.hrms.bio_att_auto_pipeline import (
+    compute_dates_to_process,
+    compute_high_water_mark,
+    should_skip,
+)
 
 
 def test_compute_dates_includes_prior_day():
@@ -41,3 +45,34 @@ def test_should_skip_when_not_advanced():
 
 def test_should_not_skip_when_new_rows():
     assert should_skip(101, 100) is False
+
+
+# ── compute_high_water_mark — advance only across fully-succeeded dates ───────
+# The mark must never jump past a date whose chain did not complete through
+# final process; otherwise a partial run (e.g. basic written but final_process
+# lost the connection) silently loses those punches forever.
+
+def test_high_water_advances_to_max_when_nothing_failed():
+    # failed_min_new_id is None -> every date succeeded -> advance fully.
+    assert compute_high_water_mark(current_max=500, last_id=100,
+                                   failed_min_new_id=None) == 500
+
+
+def test_high_water_stops_just_before_first_failed_punch():
+    # A date failed; its earliest new punch is id 350 -> lock the mark at 349 so
+    # 350+ (the failed date and everything after) is retried next tick.
+    assert compute_high_water_mark(current_max=500, last_id=100,
+                                   failed_min_new_id=350) == 349
+
+
+def test_high_water_never_moves_backward():
+    # Failed punch id is at/below the existing mark -> keep the mark, don't rewind.
+    assert compute_high_water_mark(current_max=500, last_id=100,
+                                   failed_min_new_id=100) == 100
+    assert compute_high_water_mark(current_max=500, last_id=100,
+                                   failed_min_new_id=80) == 100
+
+
+def test_high_water_does_not_exceed_current_max():
+    assert compute_high_water_mark(current_max=500, last_id=100,
+                                   failed_min_new_id=900) == 500

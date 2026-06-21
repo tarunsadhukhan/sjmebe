@@ -45,11 +45,12 @@ import threading
 import traceback
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from src.hrms.bioAttUpdation import (
     etrack_process_d_core,
+    etrack_process_d_prepare,
     bprocess_core,
     b_atten_core,
 )
@@ -126,6 +127,29 @@ def compute_dates_to_process(new_dates) -> list[date]:
 def should_skip(current_max, last_processed_id: int) -> bool:
     """True when there is no new data to process."""
     return current_max is None or int(current_max) <= int(last_processed_id)
+
+
+def compute_high_water_mark(
+    current_max: int, last_id: int, failed_min_new_id: int | None
+) -> int:
+    """Decide the new high-water mark after a pipeline pass.
+
+    The mark is advanced ONLY across dates whose chain completed all the way
+    through final process. ``failed_min_new_id`` is the smallest ``bio_att_id``
+    (strictly greater than ``last_id``) belonging to any date that did NOT fully
+    complete — e.g. one where the connection dropped after ``daily_attendance_basic``
+    but before ``daily_attendance``. It is ``None`` when every date succeeded (or
+    the failed dates carried no new punches), in which case we advance to
+    ``current_max``.
+
+    When a date failed, we stop the mark just below its earliest new punch so
+    that punch — and everything after it — is re-detected and retried on the next
+    tick (the chain is idempotent: each step deletes-then-rebuilds the date). The
+    result never moves backward (>= last_id) and never exceeds current_max.
+    """
+    if failed_min_new_id is None:
+        return int(current_max)
+    return max(int(last_id), min(int(current_max), int(failed_min_new_id) - 1))
 
 
 # ── State table (high-water mark) ────────────────────────────────────────────
@@ -223,6 +247,18 @@ _DATES_SINCE_SQL = text(
     """
 )
 
+# Smallest new (id > last_id) bio_att_id among a set of dates. Used to hold the
+# high-water mark below dates whose chain did not complete, so they retry.
+_MIN_NEW_ID_FOR_DATES_SQL = text(
+    """
+    SELECT MIN(bio_att_id) AS min_id
+    FROM bio_attendance_table
+    WHERE bio_att_id > :last_id
+      AND log_date IS NOT NULL
+      AND DATE(log_date) IN :dates
+    """
+).bindparams(bindparam("dates", expanding=True))
+
 
 def _ensure_state_table(db: Session) -> None:
     db.execute(_CREATE_STATE_SQL)
@@ -257,6 +293,18 @@ def _get_dates_since(db: Session, since: date) -> list[date]:
     )
 
 
+def _get_min_new_id_for_dates(db: Session, last_id: int, dates) -> int | None:
+    """Smallest new (bio_att_id > last_id) punch id among ``dates`` (ISO strings),
+    or None when those dates carry no new punches."""
+    if not dates:
+        return None
+    row = db.execute(
+        _MIN_NEW_ID_FOR_DATES_SQL,
+        {"last_id": int(last_id), "dates": list(dates)},
+    ).first()
+    return int(row[0]) if row and row[0] is not None else None
+
+
 def _set_last_bio_att_id(db: Session, branch_id: int, last_id: int) -> None:
     db.execute(_UPSERT_LAST_ID_SQL, {"branch_id": branch_id, "last_id": int(last_id)})
     db.commit()
@@ -279,8 +327,13 @@ def _touch_last_run_at(db: Session, branch_id: int) -> None:
 
 def _run_chain_for_date(db: Session, tran_date: str, branch_id: int) -> None:
     """Run the four-step chain for a single date. Each step commits internally
-    and is idempotent (delete-then-rebuild)."""
-    etrack_process_d_core(db, tran_date)
+    and is idempotent (delete-then-rebuild).
+
+    The table-global Etrack pre-steps (emp_code / bio_att_log_id / device_id
+    back-fill) are NOT run here — run_once runs them once per pass via
+    etrack_process_d_prepare, so we pass run_prepare=False to avoid repeating
+    three full-table UPDATEs for every date."""
+    etrack_process_d_core(db, tran_date, run_prepare=False)
     bprocess_core(db, tran_date)
     b_atten_core(db, tran_date)
     step3_final_process(db, tran_date=tran_date, branch_id=branch_id, dry_run=False)
@@ -351,6 +404,10 @@ def run_once(
             return {"skipped": True, "reason": "empty"}
         current_max = int(current_max)
 
+        # Baseline mark — used in both modes as the floor when advancing the
+        # high-water mark after the run (it must never move backward).
+        last_id = _get_last_bio_att_id(db, branch_id)
+
         if since is not None:
             dates = sorted(set(_get_dates_since(db, since)))
             log.info(
@@ -359,7 +416,6 @@ def run_once(
                 [d.isoformat() for d in dates],
             )
         else:
-            last_id = _get_last_bio_att_id(db, branch_id)
             if should_skip(current_max, last_id):
                 log.info(
                     "No new data for tenant=%s branch=%s (max=%s, last=%s) — skipping.",
@@ -374,6 +430,29 @@ def run_once(
                 tenant, branch_id, len(new_dates), len(dates),
                 [d.isoformat() for d in dates],
             )
+
+        # Run the table-global Etrack pre-steps ONCE for the whole pass (rather
+        # than once per date). If they fail (e.g. connection drop), abort this
+        # tick without advancing the high-water mark so everything retries.
+        try:
+            etrack_process_d_prepare(db)
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.error(
+                "tenant=%s branch=%s: etrack prepare FAILED — aborting tick, "
+                "high-water left at %d (retry next tick)\n%s",
+                tenant, branch_id, last_id, traceback.format_exc(),
+            )
+            return {
+                "skipped": False,
+                "max_id": current_max,
+                "high_water": last_id,
+                "processed": [],
+                "failed": [d.isoformat() for d in dates],
+            }
 
         processed: list[str] = []
         failed: list[str] = []
@@ -393,15 +472,49 @@ def run_once(
                 except Exception:
                     pass
                 failed.append(tran_date)
+                # The connection may be dead (e.g. lost connection mid-query):
+                # a poisoned session would fail every remaining date. Replace it
+                # with a fresh session so one failure doesn't cascade.
+                try:
+                    db.close()
+                except Exception:
+                    pass
+                db = make_session(tenant)
 
-        _set_last_bio_att_id(db, branch_id, current_max)
-        log.info(
-            "tenant=%s branch=%s: high-water -> %d (processed=%d, failed=%d)",
-            tenant, branch_id, current_max, len(processed), len(failed),
-        )
+        # Advance the high-water mark ONLY across dates that completed the WHOLE
+        # chain through final process. A date that failed part-way (e.g. the
+        # connection dropped after daily_attendance_basic but before
+        # daily_attendance) must keep its punches above the mark so the next tick
+        # re-detects and retries them — the chain is idempotent. If we cannot
+        # safely compute/store the new mark, leave it untouched so nothing is
+        # skipped (everything retries next tick).
+        new_high = current_max
+        try:
+            if failed:
+                failed_min_new_id = _get_min_new_id_for_dates(db, last_id, failed)
+                new_high = compute_high_water_mark(
+                    current_max, last_id, failed_min_new_id
+                )
+            _set_last_bio_att_id(db, branch_id, new_high)
+            log.info(
+                "tenant=%s branch=%s: high-water -> %d (processed=%d, failed=%d)",
+                tenant, branch_id, new_high, len(processed), len(failed),
+            )
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.error(
+                "tenant=%s branch=%s: could NOT advance high-water mark safely "
+                "(left at %d so failed/unprocessed dates retry next tick)\n%s",
+                tenant, branch_id, last_id, traceback.format_exc(),
+            )
+            new_high = last_id
         return {
             "skipped": False,
             "max_id": current_max,
+            "high_water": new_high,
             "processed": processed,
             "failed": failed,
         }
