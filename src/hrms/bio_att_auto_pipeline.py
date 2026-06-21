@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import threading
 import traceback
 from datetime import date, datetime, timedelta
 
@@ -172,6 +173,38 @@ _LOCK_NAME = "bio_att_auto"
 _GET_LOCK_SQL = text("SELECT GET_LOCK(:name, 0) AS got")
 _RELEASE_LOCK_SQL = text("SELECT RELEASE_LOCK(:name)")
 
+# ── Self-healing lock ─────────────────────────────────────────────────────────
+# GET_LOCK is connection-scoped: it releases when the holding connection closes.
+# A run that is KILLED mid-flight leaves its connection lingering server-side as
+# an idle "Sleep", holding the lock for hours (until the default 8h wait_timeout)
+# and blocking every later run. To self-heal:
+#   1) shrink the lock connection's idle wait_timeout to LOCK_WAIT_TIMEOUT_SEC, and
+#   2) keep a LIVE run's connection fresh with a heartbeat every LOCK_HEARTBEAT_SEC.
+# A live run keeps pinging, so it never times out. A killed run stops pinging, so
+# the server reaps its connection within ~LOCK_WAIT_TIMEOUT_SEC and the lock frees
+# itself — no manual KILL, no extra privilege, no lock table.
+LOCK_HEARTBEAT_SEC = 30      # ping the lock connection this often during a run
+LOCK_WAIT_TIMEOUT_SEC = 120  # server closes the idle lock conn after this (> heartbeat)
+_LOCK_HEARTBEAT_SQL = text("SELECT 1")
+_SET_LOCK_WAIT_TIMEOUT_SQL = text("SET SESSION wait_timeout = :w")
+
+
+def _lock_heartbeat(lock_db: Session, stop: threading.Event) -> None:
+    """Ping the lock connection every LOCK_HEARTBEAT_SEC until ``stop`` is set.
+
+    Runs in a daemon thread that owns ``lock_db`` exclusively while a run is in
+    progress (the main thread works on its own ``db`` session and never touches
+    ``lock_db`` until this thread has stopped). Each ping resets the connection's
+    idle timer so a live run never hits wait_timeout. If a ping fails (connection
+    already gone), the heartbeat exits — the lock is effectively released anyway.
+    """
+    while not stop.wait(LOCK_HEARTBEAT_SEC):
+        try:
+            lock_db.execute(_LOCK_HEARTBEAT_SQL)
+        except Exception:
+            log.warning("bio_att_auto lock heartbeat failed — stopping heartbeat.")
+            break
+
 _NEW_DATES_SQL = text(
     """
     SELECT DISTINCT DATE(log_date) AS d
@@ -277,7 +310,17 @@ def run_once(
     # run while `db` commits freely across the chain.
     lock_db = make_session(tenant)
     locked = False
+    hb_stop = threading.Event()
+    hb_thread = None
     try:
+        # Shrink the lock connection's idle timeout so a run that is killed
+        # mid-flight does not hold the lock for hours — the server reaps the now
+        # un-heartbeated connection within ~LOCK_WAIT_TIMEOUT_SEC, freeing the lock.
+        try:
+            lock_db.execute(_SET_LOCK_WAIT_TIMEOUT_SQL, {"w": LOCK_WAIT_TIMEOUT_SEC})
+        except Exception:
+            log.warning("Could not set wait_timeout on lock connection (continuing).")
+
         # Single-run guard across workers/instances. If another run holds the
         # lock, skip immediately rather than queueing.
         got = lock_db.execute(_GET_LOCK_SQL, {"name": _LOCK_NAME}).scalar()
@@ -288,6 +331,15 @@ def run_once(
             )
             return {"skipped": True, "reason": "locked"}
         locked = True
+
+        # Keep the lock connection alive for as long as THIS run is working, so a
+        # live run is never mistaken for a dead one and reaped. A daemon thread
+        # owns lock_db exclusively from here until the finally block stops it.
+        hb_thread = threading.Thread(
+            target=_lock_heartbeat, args=(lock_db, hb_stop),
+            name="bio_att_lock_hb", daemon=True,
+        )
+        hb_thread.start()
 
         _ensure_state_table(db)
         # Heartbeat first thing inside the lock: even a no-op tick updates
@@ -354,6 +406,11 @@ def run_once(
             "failed": failed,
         }
     finally:
+        # Stop the heartbeat and wait for it to release lock_db before this thread
+        # touches that connection again (release / close).
+        hb_stop.set()
+        if hb_thread is not None:
+            hb_thread.join(timeout=LOCK_HEARTBEAT_SEC + 5)
         if locked:
             try:
                 lock_db.execute(_RELEASE_LOCK_SQL, {"name": _LOCK_NAME})
@@ -402,10 +459,13 @@ def start_scheduler():
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.interval import IntervalTrigger
-    except Exception:
+    except Exception as exc:
+        import sys
         log.error(
-            "APScheduler is not installed — automated bio-attendance pipeline "
-            "cannot start. Add 'APScheduler' to requirements and install it."
+            "Cannot import APScheduler with interpreter %s — automated "
+            "bio-attendance pipeline cannot start. Real error: %r. Install it "
+            "into THIS interpreter:  %s -m pip install -r requirements.txt",
+            sys.executable, exc, sys.executable,
         )
         return None
 
