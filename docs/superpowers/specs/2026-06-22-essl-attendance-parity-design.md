@@ -165,3 +165,63 @@ against the spellcalculation rules.
   (~16:00) are tunable parameters; the harness fixes them empirically.
 - **Production data:** all DB use during development is read-only; the only writes
   are the existing idempotent `daily_attendance_*` rebuilds via the normal pipeline.
+
+---
+
+## Implementation findings (2026-06-23)
+
+What the build actually proved against the golden set — some of it revised the
+design above.
+
+### In/out is positional, not direction-based (confirmed 100%)
+`actual_in` = first punch, `actual_out` = last punch of a session, regardless of
+the device's in/out label (22186/22186). So eSSL's punch alternation is purely
+cosmetic for the numbers — the whole problem reduces to **session segmentation**
++ shift classification + duration math.
+
+### Segmentation is PURE TIME-GAP — direction/reader are NOT used
+The design assumed device direction (or device_id reader) could delimit
+sessions. Production data disproves this: emp 649's 22-Jun shift START (17:53)
+was physically punched on the **OUT reader** (device_id 14, dir 'out'). Both the
+direction text and the physical reader are unreliable. The resolver therefore
+splits sessions on a **single time threshold** (`NEW_SHIFT_GAP_HOURS = 11h`):
+above the largest intra-shift gap (~10h) and below the smallest inter-shift gap
+(~11.9h). This is the key robustness fix and what makes the original 649 bug stay
+fixed even with mislabelled punches.
+
+### Durations are minute-truncated (confirmed 99.4%)
+eSSL drops the seconds off each punch before differencing (`Tot.Dur = out_HHMM −
+in_HHMM`). All durations in the resolver use truncated minutes.
+
+### Work/OT split depends on eSSL config NOT present in vowerp — accepted gap
+eSSL decides the work-vs-OT split by **(a) per-employee OT-eligibility** (154
+"staff" never get OT even on 10h days, e.g. emp 11858; 245 "workers" do — and
+`catagory_id` does NOT separate them) and **(b) per-day OT sanctioning** (a
+9h21m day can still report OT=0). Neither is derivable from punches or the
+employee master. **Decision (user): standard cap for everyone** — working day
+`work = min(8h, span−breaks)`, OT = remainder; off-day/holiday/weekly-off =
+all-OT; everyone treated OT-eligible. `resolve_session(..., ot_eligible=...)`
+is the pluggable hook if an eligibility source is added later. Consequence:
+in/out, shift and total duration match eSSL; the work/OT split can differ for
+staff and OT-unsanctioned days.
+
+### Coverage is a data-completeness issue, not the resolver
+~30% of eSSL present rows have no matching session — but 6,330 of ~6,700 are
+pure data gaps (`bio_attendance_table` lacks those punches: zero/one raw punch
+for the emp-day, or the emp absent). On rows the raw data actually supports, the
+resolver lands the correct date 15189/15557 = **97.6%**.
+
+### Measured accuracy on resolvable rows
+shift **95%**, actual_in **97%**, actual_out **97%**, total duration **~99%**.
+
+### Scope landed
+Implemented **up to `daily_attendance_basic`** (per user) — the resolver
+(`src/hrms/essl_resolver.py`) + rewritten `_process_bprocess_day`. The five
+`_MARK_*` UPDATEs, `_bprocess_shift_for`, `_split_worked_break_secs`, and
+`_format_punch_records` were removed. Downstream `b_atten_core` /
+`_spell_label_for_b_atten` **sub-shift work (A1/A2/B1/B2/C) was deferred** and is
+unchanged. The golden test fixture / scorecard ran against a local snapshot of
+production data (not committed — contains employee data); the committed coverage
+is `tests/hrms/test_essl_resolver.py` (11 cases incl. emp 649/481/11858,
+off-day, no-out). Verified end-to-end against the live `sjm` DB: emp 649 on
+20-Jun and 21-Jun now reproduce the eSSL report exactly.

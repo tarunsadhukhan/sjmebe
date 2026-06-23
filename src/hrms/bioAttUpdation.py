@@ -44,6 +44,7 @@ from sqlalchemy.sql import text
 
 from src.authorization.utils import get_current_user_with_refresh
 from src.config.db import extract_subdomain_from_request, get_engine, get_tenant_db
+from src.hrms.essl_resolver import Punch, resolve_session, segment_sessions
 
 router = APIRouter()
 
@@ -3302,22 +3303,6 @@ def _spell_label_for_b_atten(
     return shift if kind == "R" else "O"
 
 
-def _bprocess_shift_for(first_h: float) -> str | None:
-    """Map first-IN hour to the eSSL shift label, or None for 'NS'/no shift."""
-    if 4 <= first_h < 9:
-        return "A"
-    if 9 <= first_h < 13:
-        return "GS"
-    if 13 <= first_h < 21:
-        return "B"
-    if first_h >= 21:
-        return "C"
-    return None
-
-
-_REGULAR_WORK_SECONDS = 8 * 3600  # eSSL regular cap (8 hours)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # daily_attendance_basic — eSSL-style daily basic report row per employee/day.
 # Created lazily (CREATE TABLE IF NOT EXISTS) to avoid a separate migration.
@@ -3382,229 +3367,23 @@ _INSERT_DAILY_BASIC_SQL = text(
 )
 
 
-def _format_punch_records(
-    relevant_punches: list[tuple],
-    *,
-    no_out_punch: bool,
-    sched_out_str: str,
-) -> str:
-    """Format an employee's punches as a single comma-separated string,
-    mirroring the eSSL 'Punch Records' column.
-
-    Each entry is "HH:MM:direction(dev_<device_id>)". When there is no out
-    punch, an "(SE)" sentinel record is appended at the scheduled out time.
+# Window fetch: every linked punch across [tran_date-1 .. tran_date+1] so the
+# resolver can group a night shift (evening IN + next-morning OUT) and strip a
+# prior night's morning exit. Only rows with all four link ids populated count.
+FETCH_BPROCESS_WINDOW_SQL = text(
     """
-    parts: list[str] = []
-    for p in relevant_punches:
-        log_dt = p[5]  # log_date
-        direction = (p[6] or "").lower() or "in"
-        if isinstance(log_dt, datetime):
-            ts = log_dt.strftime("%H:%M:%S")
-        elif isinstance(log_dt, str):
-            ts = log_dt[-8:] if len(log_dt) >= 8 else log_dt
-        else:
-            ts = str(log_dt)
-        # device_id isn't carried in the tuple — keep the format compact.
-        parts.append(f"{ts}:{direction}")
-    if no_out_punch:
-        # System-emitted out at scheduled end (matches eSSL "(SE)").
-        parts.append(f"{sched_out_str}:out(SE)")
-    return ",".join(parts)
-
-FETCH_BPROCESS_PUNCHES_SQL = text(
-    """
-    SELECT b.eb_id,
-           b.emp_code,
-           b.bio_att_log_id,
-           b.dept_id,
-           b.desig_id,
-           DATE(b.log_date)   AS punch_date,
-           TIME(b.log_date)   AS punch_time,
-           b.log_date         AS log_date,
-           b.device_direction AS device_direction
+    SELECT b.eb_id, b.emp_code, b.bio_att_log_id, b.dept_id, b.desig_id,
+           b.log_date, b.device_direction, b.device_id
     FROM bio_attendance_table b
     WHERE b.eb_id     IS NOT NULL
       AND b.dept_id   IS NOT NULL
       AND b.desig_id  IS NOT NULL
       AND b.device_id IS NOT NULL
-      AND (
-            DATE(b.log_date) = :tran_date
-         OR (DATE(b.log_date) = DATE_ADD(:tran_date, INTERVAL 1 DAY)
-             AND TIME(b.log_date) <= '08:00:00')
-      )
+      AND DATE(b.log_date) BETWEEN DATE_SUB(:tran_date, INTERVAL 1 DAY)
+                               AND DATE_ADD(:tran_date, INTERVAL 1 DAY)
     ORDER BY b.eb_id, b.log_date
     """
 )
-
-
-# Step 1 — prior night-shift OUT carryover.
-# If yesterday's first punch was after 21:00, that employee is a night-shift
-# worker, and their OUT happens on tran_date in [00:00..06:00]. Mark the LAST
-# such punch as 'out' so it doesn't get treated as today's first IN.
-_MARK_PRIOR_NIGHT_OUT_SQL = text(
-    """
-    UPDATE bio_attendance_table b
-    JOIN (
-        SELECT t.eb_id, MAX(t.log_date) AS edge_log
-        FROM bio_attendance_table t
-        JOIN (
-            SELECT eb_id, MIN(log_date) AS first_log
-            FROM bio_attendance_table
-            WHERE eb_id IS NOT NULL
-              AND DATE(log_date) = DATE_SUB(:tran_date, INTERVAL 1 DAY)
-              AND (device_direction IS NULL OR device_direction <> 'out')
-            GROUP BY eb_id
-        ) y ON t.eb_id = y.eb_id
-        WHERE DATE(t.log_date) = :tran_date
-          AND TIME(t.log_date) <= '06:00:00'
-          AND HOUR(y.first_log) > 21
-        GROUP BY t.eb_id
-    ) m ON b.eb_id = m.eb_id AND b.log_date = m.edge_log
-    SET b.device_direction = 'out'
-    WHERE DATE(b.log_date) = :tran_date
-    """
-)
-
-# Step 2 — first IN of tran_date: earliest punch NOT already marked 'out'.
-_MARK_FIRST_IN_SQL = text(
-    """
-    UPDATE bio_attendance_table b
-    JOIN (
-        SELECT eb_id, MIN(log_date) AS edge_log
-        FROM bio_attendance_table
-        WHERE eb_id IS NOT NULL
-          AND DATE(log_date) = :tran_date
-          AND (device_direction IS NULL OR device_direction <> 'out')
-        GROUP BY eb_id
-    ) m ON b.eb_id = m.eb_id AND b.log_date = m.edge_log
-    SET b.device_direction = 'in'
-    WHERE DATE(b.log_date) = :tran_date
-    """
-)
-
-# Step 2b — rescue first IN when the device mislabels EVERY punch of an
-# employee's day as 'out' (so Step 2 found no 'in' candidate and the day would be
-# silently dropped). For each employee with NO 'in' punch on tran_date, mark
-# their earliest punch that is NOT a carried-over night-shift exit as 'in'. The
-# night-exit window ([00:00..06:00] for someone whose previous day started after
-# 21:00) is excluded so a night worker's morning exit isn't mistaken for today's
-# IN. Employees who already have any 'in' are untouched — normal days are
-# unaffected; this only rescues the all-'out' case.
-_MARK_RESCUE_FIRST_IN_SQL = text(
-    """
-    UPDATE bio_attendance_table b
-    JOIN (
-        SELECT t.eb_id, MIN(t.log_date) AS edge_log
-        FROM bio_attendance_table t
-        LEFT JOIN (
-            SELECT eb_id, MIN(log_date) AS y_first
-            FROM bio_attendance_table
-            WHERE eb_id IS NOT NULL
-              AND DATE(log_date) = DATE_SUB(:tran_date, INTERVAL 1 DAY)
-            GROUP BY eb_id
-        ) y ON t.eb_id = y.eb_id
-        WHERE DATE(t.log_date) = :tran_date
-          AND t.eb_id IS NOT NULL
-          AND NOT (
-                y.y_first IS NOT NULL
-                AND HOUR(y.y_first) > 21
-                AND TIME(t.log_date) <= '06:00:00'
-          )
-          AND t.eb_id NOT IN (
-                SELECT eb_id FROM (
-                    SELECT DISTINCT eb_id
-                    FROM bio_attendance_table
-                    WHERE DATE(log_date) = :tran_date
-                      AND eb_id IS NOT NULL
-                      AND LOWER(device_direction) = 'in'
-                ) have_in
-          )
-        GROUP BY t.eb_id
-    ) m ON b.eb_id = m.eb_id AND b.log_date = m.edge_log
-    SET b.device_direction = 'in'
-    WHERE DATE(b.log_date) = :tran_date
-    """
-)
-
-# Step 3 — day-shift OUT: last punch on tran_date when the first IN's hour
-# is <= 21. The first-IN row itself is excluded so a single-punch day stays
-# as 'in' rather than being flipped to 'out'.
-_MARK_LAST_OUT_DAY_SQL = text(
-    """
-    UPDATE bio_attendance_table b
-    JOIN (
-        SELECT p.eb_id, MAX(p.log_date) AS edge_log
-        FROM bio_attendance_table p
-        JOIN (
-            SELECT eb_id, MIN(log_date) AS first_in
-            FROM bio_attendance_table
-            WHERE eb_id IS NOT NULL
-              AND DATE(log_date) = :tran_date
-              AND (device_direction IS NULL OR device_direction <> 'out')
-            GROUP BY eb_id
-        ) f ON p.eb_id = f.eb_id
-        WHERE DATE(p.log_date) = :tran_date
-          AND HOUR(f.first_in) <= 21
-          AND p.log_date <> f.first_in
-        GROUP BY p.eb_id
-    ) m ON b.eb_id = m.eb_id AND b.log_date = m.edge_log
-    SET b.device_direction = 'out'
-    WHERE DATE(b.log_date) = :tran_date
-    """
-)
-
-# Step 4 — night-shift OUT: for employees whose first IN on tran_date is
-# after 21:00, the OUT is the LAST punch on tran_date+1 within [00:00..06:00].
-_MARK_LAST_OUT_NIGHT_SQL = text(
-    """
-    UPDATE bio_attendance_table b
-    JOIN (
-        SELECT n.eb_id, MAX(n.log_date) AS edge_log
-        FROM bio_attendance_table n
-        JOIN (
-            SELECT eb_id, MIN(log_date) AS first_in
-            FROM bio_attendance_table
-            WHERE eb_id IS NOT NULL
-              AND DATE(log_date) = :tran_date
-              AND (device_direction IS NULL OR device_direction <> 'out')
-            GROUP BY eb_id
-        ) f ON n.eb_id = f.eb_id
-        WHERE DATE(n.log_date) = DATE_ADD(:tran_date, INTERVAL 1 DAY)
-          AND TIME(n.log_date) <= '06:00:00'
-          AND HOUR(f.first_in) > 21
-        GROUP BY n.eb_id
-    ) m ON b.eb_id = m.eb_id AND b.log_date = m.edge_log
-    SET b.device_direction = 'out'
-    WHERE DATE(b.log_date) = DATE_ADD(:tran_date, INTERVAL 1 DAY)
-    """
-)
-
-
-def _split_worked_break_secs(
-    punch_secs: list[int], first_sec: int, last_sec: int
-) -> tuple[int, int]:
-    """Split the span [first_sec, last_sec] into worked vs break seconds.
-
-    `first_sec` is the marked first-IN and `last_sec` the marked last-OUT
-    (both reliable). Punches strictly between them come in (OUT, IN) break
-    pairs — the employee punches OUT to leave, then IN to return — so each
-    such pair's gap is break time and worked = span − breaks.
-
-    A trailing unpaired intermediate punch (odd count → a missing break-out or
-    break-in) is ignored: no break is subtracted for it, degrading to the
-    plain-span result rather than guessing.
-
-    Returns ``(worked_secs, break_secs)``.
-    """
-    total_secs = max(0, last_sec - first_sec)
-    mid = sorted(s for s in punch_secs if first_sec < s < last_sec)
-    break_secs = 0
-    j = 0
-    while j + 1 < len(mid):  # pair (OUT, IN); drop a trailing unpaired punch
-        break_secs += mid[j + 1] - mid[j]
-        j += 2
-    break_secs = min(break_secs, total_secs)
-    return total_secs - break_secs, break_secs
 
 
 def _process_bprocess_day(
@@ -3613,183 +3392,92 @@ def _process_bprocess_day(
     tran_date: str,
     is_off_day: bool,
 ) -> int:
-    """Insert eSSL-style daily rows for each employee with punches on tran_date.
+    """Build eSSL-style daily rows for ``tran_date`` using the pure essl_resolver.
 
-    Writes:
-      - daily_attendance_process_table : one spell row (A/B/C/GS).
-      - daily_attendance_basic         : one detailed row mirroring the eSSL
-                                         Daily Attendance Detailed Report.
+    Each employee's punches across [tran_date-1 .. tran_date+1] are fetched so a
+    night shift (evening IN + next-morning OUT) groups correctly and a prior
+    night's morning exit is excluded. The session that STARTS on ``tran_date`` is
+    written to ``daily_attendance_basic`` (the eSSL detailed-report mirror) plus
+    one spell row in ``daily_attendance_process_table``.
 
-    Punches from tran_date+1 [00:00..06:00] feed the night-shift (C) OUT.
+    Work/OT policy (standard cap, all employees treated OT-eligible): a working
+    day gives work = min(8h, span - breaks) and OT = the remainder; a weekly-off
+    gives all-OT. eSSL's per-employee OT-eligibility and per-day OT sanctioning
+    are not available in this database, so the OT split can differ from the eSSL
+    report on staff and unsanctioned days; in/out, shift and total still match.
     """
-    # Marking pipeline (order matters):
-    #   1. Carry over yesterday's night-shift OUT into today's [00:00..06:00].
-    #   2. Mark today's first IN as the earliest punch NOT already 'out'.
-    #   3. Mark today's day-shift OUT (last punch when first IN <= 21).
-    #   4. Mark night-shift OUT on tran_date+1 (when first IN > 21).
-    db.execute(_MARK_PRIOR_NIGHT_OUT_SQL, {"tran_date": tran_date})
-    db.execute(_MARK_FIRST_IN_SQL, {"tran_date": tran_date})
-    # Rescue: when the device labelled every punch 'out', mark the earliest
-    # non-night-exit punch as the IN so the day still produces attendance.
-    db.execute(_MARK_RESCUE_FIRST_IN_SQL, {"tran_date": tran_date})
-    db.execute(_MARK_LAST_OUT_DAY_SQL, {"tran_date": tran_date})
-    db.execute(_MARK_LAST_OUT_NIGHT_SQL, {"tran_date": tran_date})
-
-    # Ensure target table exists; wipe rows for this tran_date for re-run.
+    # Ensure target table exists; best-effort break-column migration.
     db.execute(_CREATE_DAILY_BASIC_SQL)
-    # Best-effort: add break_minutes to tables created before it existed.
     try:
         db.execute(_ADD_BREAK_COL_SQL)
     except Exception:
         db.rollback()
+    # Idempotent re-run: wipe this date's rows in both tables.
     db.execute(_DELETE_DAILY_BASIC_SQL, {"tran_date": tran_date})
+    db.execute(DELETE_DAY_ROWS_SQL, {"tran_date": tran_date})
 
     rows = db.execute(
-        FETCH_BPROCESS_PUNCHES_SQL, {"tran_date": tran_date},
+        FETCH_BPROCESS_WINDOW_SQL, {"tran_date": tran_date},
     ).fetchall()
 
-    by_emp: dict[int, list[tuple]] = {}
-    emp_codes: dict[int, str | None] = {}
+    # Group punches per employee; remember identity from the first punch seen.
+    punches_by_emp: dict[int, list[Punch]] = {}
+    identity: dict[int, dict] = {}
     for r in rows:
         m = r._mapping
-        if m["eb_id"] not in emp_codes:
-            emp_codes[m["eb_id"]] = m["emp_code"]
-        by_emp.setdefault(m["eb_id"], []).append((
-            str(m["punch_date"]), m["punch_time"], m["bio_att_log_id"],
-            m["dept_id"], m["desig_id"], m["log_date"],
-            m["device_direction"],
-        ))
+        eb = m["eb_id"]
+        punches_by_emp.setdefault(eb, []).append(
+            Punch(
+                log_date=m["log_date"],
+                raw_dir=(m["device_direction"] or ""),
+                device_id=m["device_id"],
+            )
+        )
+        identity.setdefault(eb, {
+            "emp_code": m["emp_code"],
+            "bio_id": m["bio_att_log_id"],
+            "dept_id": m["dept_id"],
+            "desig_id": m["desig_id"],
+        })
+
+    target = date.fromisoformat(tran_date) if isinstance(tran_date, str) else tran_date
 
     inserted = 0
-    for eb_id, punches in by_emp.items():
-        emp_code = emp_codes.get(eb_id)
-        day0 = [p for p in punches if p[0] == tran_date]
-        day1 = [p for p in punches if p[0] != tran_date]
-        if not day0:
+    for eb, plist in punches_by_emp.items():
+        # Resolve sessions; write only the one that STARTS on tran_date.
+        day = None
+        for sess in segment_sessions(plist):
+            if sess[0].log_date.date() != target:
+                continue
+            day = resolve_session(sess, is_off_day=is_off_day)
+            if day is not None:
+                break
+        if day is None:
             continue
 
-        # Skip leading day0 rows already marked 'out' — those are the prior
-        # night shift's exit punches that landed in today's date.
-        first_idx = 0
-        while (
-            first_idx < len(day0)
-            and (day0[first_idx][6] or "").lower() == "out"
-        ):
-            first_idx += 1
-        if first_idx >= len(day0):
-            continue
-        day0 = day0[first_idx:]
-
-        first_pdate, first_time, first_bio, first_dept, first_desig, first_log_date, _ = day0[0]
-        first_sec = _to_seconds(first_time)
-        first_h   = first_sec / 3600.0
-
-        # ---- Step 1: pick OUT punch ----
-        # Priority: if next day's first record is 'out' AND the resulting
-        # span (first_in -> that punch) is < 17h, that punch is today's OUT.
-        # Cross-midnight cases (any first_h) are caught here.
-        no_out_punch = False
-        last_sec: int | None = None
-        last_log_date = None
-        crosses_midnight = False
-
-        if day1 and (day1[0][6] or "").lower() == "out":
-            cand_sec = _to_seconds(day1[0][1]) + 24 * 3600
-            if cand_sec - first_sec < 17 * 3600:
-                last_sec = cand_sec
-                last_log_date = day1[0][5]
-                crosses_midnight = True
-
-        # ---- Step 2: classify shift ----
-        # Cross-midnight overrides band detection → always Shift C.
-        if crosses_midnight:
-            shift = "C"
-        else:
-            shift = _bprocess_shift_for(first_h)
-            if shift is None:
-                continue  # No matching shift band → treat as NS, skip.
-
-        sched_in_str, sched_out_str = _BPROCESS_SPELL_TIMES[shift]
-        sched_in_sec = _to_seconds(_parse_hms(sched_in_str))
-        sched_out_sec = _to_seconds(_parse_hms(sched_out_str))
-        if shift == "C":  # OUT is on next day → 06:00 + 24h.
-            sched_out_sec += 24 * 3600
-
-        # ---- Step 3: fall back to shift-specific OUT when priority didn't hit. ----
-        if last_sec is None:
-            if shift == "C":
-                if day1:
-                    _, last_time, _, _, _, last_log_date, _ = day1[-1]
-                    last_sec = _to_seconds(last_time) + 24 * 3600
-                elif len(day0) > 1:
-                    _, last_time, _, _, _, last_log_date, _ = day0[-1]
-                    last_sec = _to_seconds(last_time)
-                else:
-                    # No OUT punch found — synthesize at scheduled out time.
-                    no_out_punch = True
-                    last_sec = sched_out_sec
-                    last_log_date = None
-            else:
-                if len(day0) > 1:
-                    _, last_time, _, _, _, last_log_date, _ = day0[-1]
-                    last_sec = _to_seconds(last_time)
-                else:
-                    no_out_punch = True
-                    last_sec = sched_out_sec
-                    last_log_date = None
-
-        total_secs = max(0, last_sec - first_sec)
-
-        # ---- Break-aware worked time ----
-        # Punches between the first-IN and last-OUT come in (OUT, IN) break
-        # pairs; subtract each gap as break time. See _split_worked_break_secs.
-        # Example: 05:54 IN, 13:55 OUT, 18:03 IN, 21:54 OUT → break 13:55→18:03,
-        # worked = 16h − 4.13h = 11.85h (8h work + 3.85h OT).
-        punch_secs = [_to_seconds(p[1]) for p in day0]
-        if crosses_midnight or shift == "C":
-            punch_secs.extend(_to_seconds(p[1]) + 24 * 3600 for p in day1)
-        worked_secs, break_secs = _split_worked_break_secs(
-            punch_secs, first_sec, last_sec
-        )
-
-        # eSSL Work/OT split — applied to the break-excluded worked time.
-        if no_out_punch:
-            # No OUT punch — use sched_out as boundary; whole span is Work
-            # (no OT credit because there's no actual out-time to verify).
-            work_secs = worked_secs
-            ot_secs   = 0
-        else:
-            work_secs = min(_REGULAR_WORK_SECONDS, worked_secs)
-            ot_secs   = max(0, worked_secs - _REGULAR_WORK_SECONDS)
-
-        late_by_secs       = max(0, first_sec - sched_in_sec)
-        early_going_secs   = (
-            0 if no_out_punch else max(0, sched_out_sec - last_sec)
-        )
-
-        if no_out_punch:
-            status = "Present (No OutPunch)"
-        else:
-            status = "Off Day Present" if is_off_day else "Present"
+        ident = identity.get(eb, {})
+        bio_id = ident.get("bio_id")
+        dept_id = ident.get("dept_id")
+        desig_id = ident.get("desig_id")
+        spell_start, spell_end = _BPROCESS_SPELL_TIMES.get(
+            day.shift, ("00:00:00", "00:00:00"))
+        working_hours = round(day.work_minutes / 60.0, 2)
+        ot_hours = round(day.ot_minutes / 60.0, 2)
+        time_duration = round(working_hours + ot_hours, 2)
 
         # ---- daily_attendance_process_table (one spell row) ----
-        att_type      = "O" if is_off_day else "R"
-        working_hours = round(work_secs / 3600.0, 2)
-        ot_hours      = round(ot_secs / 3600.0, 2)
-        time_duration = round(working_hours + ot_hours, 2)
-        spell_start, spell_end = _BPROCESS_SPELL_TIMES[shift]
         db.execute(
             INSERT_SPELL_ROW_SQL,
             {
-                "eb_id":           int(eb_id),
-                "bio_id":          int(first_bio) if first_bio is not None else None,
-                "dept_id":         int(first_dept) if first_dept is not None else None,
-                "desig_id":        int(first_desig) if first_desig is not None else None,
+                "eb_id":           int(eb),
+                "bio_id":          int(bio_id) if bio_id is not None else None,
+                "dept_id":         int(dept_id) if dept_id is not None else None,
+                "desig_id":        int(desig_id) if desig_id is not None else None,
                 "tran_date":       tran_date,
-                "spell_name":      shift,
-                "attendance_type": att_type,
-                "check_in":        first_log_date,
-                "check_out":       last_log_date,
+                "spell_name":      day.shift,
+                "attendance_type": "O" if is_off_day else "R",
+                "check_in":        day.actual_in,
+                "check_out":       day.actual_out,
                 "time_duration":   time_duration,
                 "working_hours":   working_hours,
                 "ot_hours":        ot_hours,
@@ -3800,39 +3488,28 @@ def _process_bprocess_day(
         )
 
         # ---- daily_attendance_basic (eSSL detailed-report row) ----
-        # Build the punch_records string from today's relevant punches +
-        # any next-day punch we used for the OUT (cross-midnight / shift C).
-        relevant_punches = list(day0)
-        if crosses_midnight or shift == "C":
-            relevant_punches.extend(day1)
-        punch_records_str = _format_punch_records(
-            relevant_punches,
-            no_out_punch=no_out_punch,
-            sched_out_str=sched_out_str,
-        )
-
         db.execute(
             _INSERT_DAILY_BASIC_SQL,
             {
-                "eb_id":               int(eb_id),
-                "emp_code":            emp_code,
-                "bio_id":              int(first_bio) if first_bio is not None else None,
-                "dept_id":             int(first_dept) if first_dept is not None else None,
-                "desig_id":            int(first_desig) if first_desig is not None else None,
+                "eb_id":               int(eb),
+                "emp_code":            ident.get("emp_code"),
+                "bio_id":              int(bio_id) if bio_id is not None else None,
+                "dept_id":             int(dept_id) if dept_id is not None else None,
+                "desig_id":            int(desig_id) if desig_id is not None else None,
                 "tran_date":           tran_date,
-                "shift":               shift,
-                "sched_in_time":       sched_in_str,
-                "sched_out_time":      sched_out_str,
-                "actual_in":           first_log_date,
-                "actual_out":          last_log_date,
-                "work_dur_minutes":    work_secs // 60,
-                "ot_minutes":          ot_secs // 60,
-                "break_minutes":       break_secs // 60,
-                "total_dur_minutes":   total_secs // 60,
-                "late_by_minutes":     late_by_secs // 60,
-                "early_going_minutes": early_going_secs // 60,
-                "status":              status,
-                "punch_records":       punch_records_str,
+                "shift":               day.shift,
+                "sched_in_time":       spell_start,
+                "sched_out_time":      spell_end,
+                "actual_in":           day.actual_in,
+                "actual_out":          day.actual_out,
+                "work_dur_minutes":    day.work_minutes,
+                "ot_minutes":          day.ot_minutes,
+                "break_minutes":       day.break_minutes,
+                "total_dur_minutes":   day.total_minutes,
+                "late_by_minutes":     day.late_minutes,
+                "early_going_minutes": day.early_going_minutes,
+                "status":              day.status,
+                "punch_records":       day.punch_records,
             },
         )
         inserted += 1
