@@ -2197,9 +2197,14 @@ def _build_desired_daily_rows(
         except Exception:
             ot = 0.0
 
+        # Working-row attendance_type comes straight from the process table
+        # (R = regular / O = off-day); fall back to working_att_type only when
+        # the process row left it blank. OT rows are always 'O'.
+        proc_att_type = (m.get("attendance_type") or "").strip() or working_att_type
+
         entries: list[tuple[str, float]] = []
         if wh > 0:
-            entries.append((working_att_type, wh))
+            entries.append((proc_att_type, wh))
         if ot > 0:
             entries.append(("O", ot))
         if not entries:
@@ -3367,9 +3372,19 @@ _INSERT_DAILY_BASIC_SQL = text(
 )
 
 
-# Window fetch: every linked punch across [tran_date-1 .. tran_date+1] so the
+# Window fetch: every linked punch across [tran_date-14 .. tran_date+1] so the
 # resolver can group a night shift (evening IN + next-morning OUT) and strip a
 # prior night's morning exit. Only rows with all four link ids populated count.
+#
+# The 14-day lookback (not 1) anchors session segmentation correctly for a
+# CONTINUOUS worker — one who punches every ~8h with no >11h rest gap, so their
+# shift-days can only be separated by span (see essl_resolver.MAX_SESSION_HOURS),
+# and that split cascade must start from the run's true beginning (the last >11h
+# rest gap before tran_date). A 1-day window can start mid-cycle on a morning-out
+# punch and mis-anchor the cascade, mislabeling the day. Only the session that
+# STARTS on tran_date is written; the extra days are context for anchoring.
+# ponytail: 14d covers weekly-off runs (<=6-7 days) with margin; a worker on a
+# genuine >14-day unbroken run could still mislabel late dates — widen then.
 FETCH_BPROCESS_WINDOW_SQL = text(
     """
     SELECT b.eb_id, b.emp_code, b.bio_att_log_id, b.dept_id, b.desig_id,
@@ -3379,7 +3394,7 @@ FETCH_BPROCESS_WINDOW_SQL = text(
       AND b.dept_id   IS NOT NULL
       AND b.desig_id  IS NOT NULL
       AND b.device_id IS NOT NULL
-      AND DATE(b.log_date) BETWEEN DATE_SUB(:tran_date, INTERVAL 1 DAY)
+      AND DATE(b.log_date) BETWEEN DATE_SUB(:tran_date, INTERVAL 14 DAY)
                                AND DATE_ADD(:tran_date, INTERVAL 1 DAY)
     ORDER BY b.eb_id, b.log_date
     """

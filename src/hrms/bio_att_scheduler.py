@@ -43,7 +43,7 @@ import logging
 import os
 import sys
 import traceback
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 
 # ── Bootstrap paths so `src.*` imports work when run as a script ─────────────
@@ -176,40 +176,79 @@ def step1_etrack_data(
     new_dates: set[date] = set()
 
     try:
-        for idx, (table_name, _m_start, _m_end) in enumerate(tables):
+        for idx, (table_name, m_start, m_end) in enumerate(tables):
             is_first_table = (idx == 0)
+            table_present = _table_exists(sconn, table_name)
 
-            if not _table_exists(sconn, table_name):
-                log.warning("Step 1 | table %s does not exist — skipping", table_name)
-                continue
-
-            # For the first (oldest) table filter by DeviceLogId > last_log_id.
-            # For subsequent tables fetch everything.
-            if is_first_table:
-                sql = (
-                    f"SELECT dl.DeviceLogId, dl.DeviceId, dl.UserId, dl.LogDate, "
-                    f"       dl.Direction, em.EmployeeId, em.EmployeeCode, "
-                    f"       em.EmployeeName, em.CompanyId "
-                    f"FROM dbo.{table_name} dl "
-                    f"LEFT JOIN dbo.Employees em "
-                    f"  ON em.EmployeeCodeInDevice = dl.UserId "
-                    f"WHERE dl.DeviceLogId > ? "
-                    f"  AND em.CompanyId = ? "
-                    f"ORDER BY dl.DeviceLogId"
-                )
-                params = (last_log_id, company_id)
+            # eSSL writes the CURRENT month's punches to the live base `DeviceLogs`
+            # table and only archives them into DeviceLogs_<m>_<y> later. A month
+            # whose archive table does not exist yet (typically the current month)
+            # is therefore read straight from the live base table for that month's
+            # date range — otherwise current-month punches are never ingested.
+            # The base table uses a separate, much larger DeviceLogId space, so it
+            # is cursored by LogDate (not the monthly id cursor) and de-duped against
+            # the log ids already stored for that window.
+            existing_logids: set[int] | None = None
+            if table_present:
+                # For the first (oldest) archived table filter by DeviceLogId >
+                # last_log_id; for subsequent archived tables fetch the whole month.
+                if is_first_table:
+                    sql = (
+                        f"SELECT dl.DeviceLogId, dl.DeviceId, dl.UserId, dl.LogDate, "
+                        f"       dl.Direction, em.EmployeeId, em.EmployeeCode, "
+                        f"       em.EmployeeName, em.CompanyId "
+                        f"FROM dbo.{table_name} dl "
+                        f"LEFT JOIN dbo.Employees em "
+                        f"  ON em.EmployeeCodeInDevice = dl.UserId "
+                        f"WHERE dl.DeviceLogId > ? "
+                        f"  AND em.CompanyId = ? "
+                        f"ORDER BY dl.DeviceLogId"
+                    )
+                    params = (last_log_id, company_id)
+                else:
+                    sql = (
+                        f"SELECT dl.DeviceLogId, dl.DeviceId, dl.UserId, dl.LogDate, "
+                        f"       dl.Direction, em.EmployeeId, em.EmployeeCode, "
+                        f"       em.EmployeeName, em.CompanyId "
+                        f"FROM dbo.{table_name} dl "
+                        f"LEFT JOIN dbo.Employees em "
+                        f"  ON em.EmployeeCodeInDevice = dl.UserId "
+                        f"WHERE em.CompanyId = ? "
+                        f"ORDER BY dl.DeviceLogId"
+                    )
+                    params = (company_id,)
             else:
+                # Not archived yet — read the live base table for this month's range.
+                read_from = datetime.combine(m_start, dt_time.min)
+                # Re-scan only from just before our newest data (cheap, still catches
+                # same-day late arrivals); never earlier than the month start.
+                if last_log_date and last_log_date > m_start:
+                    read_from = datetime.combine(
+                        last_log_date - timedelta(days=1), dt_time.min)
+                upper = datetime.combine(m_end, dt_time.max)
                 sql = (
-                    f"SELECT dl.DeviceLogId, dl.DeviceId, dl.UserId, dl.LogDate, "
-                    f"       dl.Direction, em.EmployeeId, em.EmployeeCode, "
-                    f"       em.EmployeeName, em.CompanyId "
-                    f"FROM dbo.{table_name} dl "
-                    f"LEFT JOIN dbo.Employees em "
-                    f"  ON em.EmployeeCodeInDevice = dl.UserId "
-                    f"WHERE em.CompanyId = ? "
-                    f"ORDER BY dl.DeviceLogId"
+                    "SELECT dl.DeviceLogId, dl.DeviceId, dl.UserId, dl.LogDate, "
+                    "       dl.Direction, em.EmployeeId, em.EmployeeCode, "
+                    "       em.EmployeeName, em.CompanyId "
+                    "FROM dbo.DeviceLogs dl "
+                    "LEFT JOIN dbo.Employees em "
+                    "  ON em.EmployeeCodeInDevice = dl.UserId "
+                    "WHERE dl.LogDate > ? AND dl.LogDate <= ? "
+                    "  AND em.CompanyId = ? "
+                    "ORDER BY dl.LogDate"
                 )
-                params = (company_id,)
+                params = (read_from, upper, company_id)
+                existing_logids = {
+                    int(x[0])
+                    for x in db.execute(
+                        text(
+                            "SELECT DISTINCT bio_att_log_id FROM bio_attendance_table "
+                            "WHERE log_date > :rf AND log_date <= :up "
+                            "  AND bio_att_log_id IS NOT NULL"
+                        ),
+                        {"rf": read_from, "up": upper},
+                    ).fetchall()
+                }
 
             try:
                 cur = sconn.cursor()
@@ -219,7 +258,12 @@ def step1_etrack_data(
                 log.error("Step 1 | query failed on %s: %s", table_name, exc)
                 continue
 
-            log.info("Step 1 | %s -> %d row(s) fetched", table_name, len(src_rows))
+            src_label = table_name if table_present else f"live DeviceLogs[{table_name}]"
+            log.info(
+                "Step 1 | %s -> %d row(s) fetched%s", src_label, len(src_rows),
+                "" if existing_logids is None
+                else f" ({len(existing_logids)} already stored in window)",
+            )
             inserted = 0
 
             for r in src_rows:
@@ -238,6 +282,10 @@ def step1_etrack_data(
                     "device_id":      int(r.DeviceId) if r.DeviceId is not None else None,
                 }
                 if params_ins["bio_att_log_id"] is None:
+                    continue
+                if (existing_logids is not None
+                        and params_ins["bio_att_log_id"] in existing_logids):
+                    # Already ingested in this re-scanned live-table window.
                     continue
 
                 if dry_run:

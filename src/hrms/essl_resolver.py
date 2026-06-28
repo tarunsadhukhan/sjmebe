@@ -41,6 +41,22 @@ from datetime import date, datetime, timedelta
 # delimit sessions.
 NEW_SHIFT_GAP_HOURS = 11.0
 
+# A session is one shift-day. A continuous multi-shift worker (e.g. afternoon-IN
+# -> night work -> next-morning-OUT, day after day) punches every ~8h, so no gap
+# ever exceeds NEW_SHIFT_GAP_HOURS and a pure gap split would merge every day into
+# one session — losing all but the first day. Cap a session's span instead: the
+# eSSL golden set has legitimate sessions up to ~16h (p99.9) and essentially none
+# beyond 18h, so a run that reaches MAX_SESSION_HOURS from its first punch has
+# rolled into the next shift and must start a fresh session.
+# ponytail: empirical cap (vendor ceiling + margin); widen only if a real single
+# shift legitimately exceeds it.
+MAX_SESSION_HOURS = 18.0
+
+# Consecutive punches within this gap are the SAME event (a double-tap or a
+# device re-read) and collapse to one punch. Measured from the previous KEPT
+# punch, mirroring an eSSL device's minimum-repunch lockout.
+MIN_REPUNCH_MINUTES = 2
+
 REGULAR_WORK_MINUTES = 8 * 60  # eSSL regular-hours cap (8h)
 
 # Scheduled in/out per shift (HH:MM). Shift C's out is on the next calendar day.
@@ -110,22 +126,42 @@ def _shift_for(first_in: datetime, crosses_midnight: bool) -> str | None:
     return "C"
 
 
+def _collapse_near_duplicates(ordered: list[Punch]) -> list[Punch]:
+    """Drop punches within ``MIN_REPUNCH_MINUTES`` of the previous KEPT punch.
+
+    Input must be chronologically sorted. A burst (double-tap / device re-read)
+    collapses to its earliest punch, so it never fabricates a short break or a
+    1-minute in/out pair. The lockout resets from each kept punch, matching an
+    eSSL device's minimum-repunch interval.
+    """
+    kept: list[Punch] = []
+    for p in ordered:
+        if kept and (p.log_date - kept[-1].log_date) <= timedelta(minutes=MIN_REPUNCH_MINUTES):
+            continue
+        kept.append(p)
+    return kept
+
+
 def segment_sessions(punches: list[Punch]) -> list[list[Punch]]:
     """Split an employee's chronologically-sorted punches into work sessions.
 
-    A new session starts whenever the gap from the previous punch exceeds
-    ``NEW_SHIFT_GAP_HOURS``. The split is purely time-based: a night shift's
-    evening IN keeps its next-morning OUT (gap < threshold) while a genuinely new
-    shift (gap > threshold) starts fresh — and a long day shift whose only two
-    punches sit ~10h apart is not split. The device's in/out label and physical
-    reader are deliberately ignored here (a shift can be punched on the wrong
-    reader); in/out within a session is positional (first punch / last punch).
+    Near-duplicate punches (within ``MIN_REPUNCH_MINUTES``) are first collapsed to
+    a single event. A new session then starts whenever the gap from the previous
+    punch exceeds ``NEW_SHIFT_GAP_HOURS``. The split is purely time-based: a night
+    shift's evening IN keeps its next-morning OUT (gap < threshold) while a
+    genuinely new shift (gap > threshold) starts fresh — and a long day shift whose
+    only two punches sit ~10h apart is not split. The device's in/out label and
+    physical reader are deliberately ignored here (a shift can be punched on the
+    wrong reader); in/out within a session is positional (first punch / last punch).
     """
-    ordered = sorted(punches, key=lambda p: p.log_date)
+    ordered = _collapse_near_duplicates(sorted(punches, key=lambda p: p.log_date))
     sessions: list[list[Punch]] = []
     current: list[Punch] = []
     for p in ordered:
-        if current and (p.log_date - current[-1].log_date) > timedelta(hours=NEW_SHIFT_GAP_HOURS):
+        if current and (
+            (p.log_date - current[-1].log_date) > timedelta(hours=NEW_SHIFT_GAP_HOURS)
+            or (p.log_date - current[0].log_date) > timedelta(hours=MAX_SESSION_HOURS)
+        ):
             sessions.append(current)
             current = []
         current.append(p)

@@ -167,6 +167,72 @@ def test_no_out_punch():
     assert "No OutPunch" in d.status
 
 
+# ── near-duplicate punches (<=2 min apart) collapse to one event ──────────────
+
+def test_near_duplicate_punches_within_2min_collapse():
+    # A double-tap at clock-in (06:00, 06:01, 06:02) is one event: no spurious
+    # break / short-out; worked = the full 06:00 -> 14:00 span.
+    d = resolve_employee_days([
+        _p("2026-05-01 06:00:00", 22),
+        _p("2026-05-01 06:01:00", 14),   # 1 min after kept 06:00 -> dropped
+        _p("2026-05-01 06:02:00", 22),   # 2 min after kept 06:00 -> dropped
+        _p("2026-05-01 14:00:00", 14),
+    ])[0]
+    assert d.actual_in == datetime(2026, 5, 1, 6, 0, 0)
+    assert d.actual_out == datetime(2026, 5, 1, 14, 0, 0)
+    assert d.break_minutes == 0
+    assert d.total_minutes == 480
+
+
+def test_punches_more_than_2min_apart_are_kept():
+    # A genuine 3-minute break is preserved (not collapsed).
+    d = resolve_employee_days([
+        _p("2026-05-01 06:00:00", 22),
+        _p("2026-05-01 10:00:00", 14),
+        _p("2026-05-01 10:03:00", 22),   # 3 min after kept 10:00 -> kept
+        _p("2026-05-01 14:00:00", 14),
+    ])[0]
+    assert d.break_minutes == 3
+    assert d.total_minutes == 8 * 60 - 3
+
+
+# ── continuous multi-shift worker: split per shift-day (no >11h rest gap) ──────
+
+def test_continuous_worker_split_into_daily_sessions():
+    # emp 10874: punches every ~8h across days with no >11h gap. eSSL reports one
+    # Shift-C session per day (afternoon IN -> next-morning OUT); the resolver must
+    # split per shift-day, not merge all days into a single session.
+    punches = [_p(s, 22) for s in [
+        "2026-06-01 14:02:36", "2026-06-01 22:00:26", "2026-06-01 22:00:36",
+        "2026-06-02 05:56:50", "2026-06-02 14:02:52", "2026-06-02 22:00:41",
+        "2026-06-02 22:00:49", "2026-06-03 05:57:53", "2026-06-03 13:45:56",
+        "2026-06-03 22:00:13", "2026-06-03 22:00:22", "2026-06-04 05:56:03",
+    ]]
+    days = {d.tran_date.isoformat(): d for d in resolve_employee_days(punches)}
+    assert days["2026-06-01"].shift == "C"
+    assert days["2026-06-01"].actual_in == datetime(2026, 6, 1, 14, 2, 36)
+    assert days["2026-06-01"].actual_out == datetime(2026, 6, 2, 5, 56, 50)
+    assert days["2026-06-01"].work_minutes == 480       # vendor: work 8:00
+    assert days["2026-06-01"].ot_minutes == 474         # vendor: OT 7:54
+    assert days["2026-06-02"].actual_in == datetime(2026, 6, 2, 14, 2, 52)
+    assert days["2026-06-02"].actual_out == datetime(2026, 6, 3, 5, 57, 53)
+    assert days["2026-06-03"].actual_in == datetime(2026, 6, 3, 13, 45, 56)
+    assert days["2026-06-03"].actual_out == datetime(2026, 6, 4, 5, 56, 3)
+
+
+def test_single_long_presence_under_cap_not_split():
+    # A genuine ~16h presence (one shift-day, under MAX_SESSION_HOURS) with mid
+    # punches so no single gap exceeds 11h: stays one session, not chopped.
+    d = resolve_employee_days([
+        _p("2026-05-01 06:00:00", 22),
+        _p("2026-05-01 14:00:00", 14),   # mid punch keeps gaps < 11h
+        _p("2026-05-01 22:00:00", 14),
+    ])
+    assert len(d) == 1
+    assert d[0].actual_in == datetime(2026, 5, 1, 6, 0, 0)
+    assert d[0].actual_out == datetime(2026, 5, 1, 22, 0, 0)
+
+
 # ── segmentation: distinct days separated ─────────────────────────────────────
 
 def test_segmentation_separates_distinct_days():
