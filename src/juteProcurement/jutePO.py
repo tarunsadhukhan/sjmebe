@@ -20,6 +20,7 @@ from src.juteProcurement.query import (
     get_suppliers_by_mukam_query,
     get_parties_by_supplier_query,
     get_branches_query,
+    get_company_letterhead_query,
     get_all_suppliers_query,
     get_brokers_query,
     get_jute_po_with_approval_info,
@@ -309,6 +310,10 @@ async def jute_po_create_setup(
         brokers_result = db.execute(get_brokers_query(), {"co_id": co_id}).fetchall()
         brokers = [dict(r._mapping) for r in brokers_result]
 
+        # Company letterhead for the printable PO preview
+        company_row = db.execute(get_company_letterhead_query(), {"co_id": co_id}).fetchone()
+        company = dict(company_row._mapping) if company_row else None
+
         # Static options
         channel_options = [
             {"value": "DOMESTIC", "label": "Domestic"},
@@ -340,6 +345,7 @@ async def jute_po_create_setup(
             "jute_groups": jute_groups,
             "suppliers": suppliers,
             "brokers": brokers,
+            "company": company,
             "channel_options": channel_options,
             "unit_options": unit_options,
             "crop_year_options": crop_year_options,

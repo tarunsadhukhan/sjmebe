@@ -422,15 +422,35 @@ def get_all_suppliers_query():
 def get_branches_query():
     """
     Query to get list of branches for the company.
+    Includes contact info for print letterheads.
     """
     sql = """
-        SELECT 
+        SELECT
             branch_id,
-            branch_name
+            branch_name,
+            contact_no AS branch_contact_no,
+            branch_email
         FROM branch_mst
         WHERE co_id = :co_id
         AND (active = 1 OR active IS NULL)
         ORDER BY branch_name
+    """
+    return text(sql)
+
+
+def get_company_letterhead_query():
+    """
+    Query to get company letterhead details for printable documents.
+    """
+    sql = """
+        SELECT
+            co_name,
+            co_logo,
+            co_address1,
+            co_address2,
+            co_zipcode
+        FROM co_mst
+        WHERE co_id = :co_id
     """
     return text(sql)
 
