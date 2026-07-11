@@ -87,8 +87,10 @@ from src.hrms.dailyMachineEntry import router as hrms_daily_machine_router
 from src.hrms.manMachine import router as hrms_man_machine_router
 from src.hrms.desigNormsSet import router as hrms_desig_norms_router
 from src.hrms.manMachineMst import router as hrms_man_machine_mst_router
+from src.hrms.bioEmpMstLink import router as hrms_bio_emp_link_router
 from src.hrms.empAttendanceReport import router as hrms_emp_attendance_report_router
 from src.hrms.empWagesReport import router as hrms_emp_wages_report_router
+from src.hrms.handsReport import router as hrms_hands_report_router
 from src.production.mcStoppage import router as production_mc_stoppage_router
 from src.misEntries.yarnPurchase import router as mis_entries_yarn_purchase_router
 from src.misEntries.electricityDG import router as mis_entries_electricity_dg_router
@@ -217,8 +219,10 @@ app.include_router(hrms_daily_machine_router, prefix="/api/hrmsMasters", tags=["
 app.include_router(hrms_man_machine_router, prefix="/api/hrmsMasters", tags=["hrms-masters"])
 app.include_router(hrms_desig_norms_router, prefix="/api/hrmsMasters", tags=["hrms-masters"])
 app.include_router(hrms_man_machine_mst_router, prefix="/api/hrmsMasters", tags=["hrms-masters"])
+app.include_router(hrms_bio_emp_link_router, prefix="/api/hrmsMasters", tags=["hrms-masters"])
 app.include_router(hrms_emp_attendance_report_router, prefix="/api/hrmsReports", tags=["hrms-reports"])
 app.include_router(hrms_emp_wages_report_router, prefix="/api/hrmsReports", tags=["hrms-reports"])
+app.include_router(hrms_hands_report_router, prefix="/api/hrmsReports", tags=["hrms-reports"])
 app.include_router(production_mc_stoppage_router, prefix="/api/productionEntry", tags=["production-entry"])
 app.include_router(mis_entries_yarn_purchase_router, prefix="/api/misEntries", tags=["mis-entries"])
 app.include_router(mis_entries_electricity_dg_router, prefix="/api/misEntries", tags=["mis-entries"])
