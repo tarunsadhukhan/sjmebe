@@ -375,7 +375,11 @@ def get_spinning_running_hours_eff_query():
     run (tarprod is per 8-hour shift, so tarprod / 8 is the standard
     per-hour rate).
 
+    One row per (date, machine, quality); the frontend pivots dates into
+    column groups with Prod / Hrs / Eff% sub-columns.
+
     Expected projection:
+        report_date       string (dd-mm-YYYY)
         mc_id             int
         mc_name           string
         quality_id        int
@@ -389,6 +393,7 @@ def get_spinning_running_hours_eff_query():
     """
     sql = """
         SELECT
+            DATE_FORMAT(g.doff_date, '%d-%m-%Y')                    AS report_date,
             g.mc_id                                                 AS mc_id,
             COALESCE(mm.machine_name, CONCAT('Machine #', g.mc_id)) AS mc_name,
             g.quality_id                                            AS quality_id,
@@ -466,7 +471,7 @@ def get_spinning_running_hours_eff_query():
                 )
         ) g
         LEFT JOIN machine_mst mm ON mm.machine_id = g.mc_id
-        GROUP BY g.mc_id, mm.machine_name, g.quality_id, g.quality
-        ORDER BY mm.machine_name, g.quality
+        GROUP BY g.doff_date, g.mc_id, mm.machine_name, g.quality_id, g.quality
+        ORDER BY mm.machine_name, g.quality, g.doff_date
     """
     return text(sql)

@@ -222,6 +222,7 @@ class SpinningFrameRunningResponse(BaseModel):
 
 
 class SpinningRunningHoursEffRow(BaseModel):
+    report_date: Optional[str] = None
     mc_id: Optional[int] = None
     mc_name: Optional[str] = None
     quality_id: Optional[int] = None
