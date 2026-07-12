@@ -363,6 +363,18 @@ def get_spinning_running_hours_eff_query():
     Per (machine, quality) totals over the date range — production divided by
     running hours.
 
+    Source:
+      - daily_doff_tbl                  production per (mc, date, spell)
+      - tbl_daily_vvfd_transaction      running hours per (mc, date, spell)
+      - daily_doff_frames_winding       spg_wdg = 'S' rows -> quality per
+                                        (mc, date, spell)
+      - spinning_quality_mst            target production inputs
+
+    eff = production / (tarprod / 8 * running_hours) * 100 — i.e. actual
+    production vs the standard production expected for the hours actually
+    run (tarprod is per 8-hour shift, so tarprod / 8 is the standard
+    per-hour rate).
+
     Expected projection:
         mc_id             int
         mc_name           string
@@ -371,16 +383,90 @@ def get_spinning_running_hours_eff_query():
         production        numeric
         running_hours     numeric
         eff               numeric  — production-per-hour vs standard rate %
+
+    Parameters: :branch_id (unused — consistent with the sibling spinning
+                queries), :from_date, :to_date ('YYYY-MM-DD')
     """
     sql = """
         SELECT
-            CAST(NULL AS UNSIGNED)        AS mc_id,
-            CAST(NULL AS CHAR)            AS mc_name,
-            CAST(NULL AS UNSIGNED)        AS quality_id,
-            CAST(NULL AS CHAR)            AS quality_name,
-            0.0                            AS production,
-            0.0                            AS running_hours,
-            0.0                            AS eff
-        WHERE 1 = 0
+            g.mc_id                                                 AS mc_id,
+            COALESCE(mm.machine_name, CONCAT('Machine #', g.mc_id)) AS mc_name,
+            g.quality_id                                            AS quality_id,
+            g.quality                                               AS quality_name,
+            ROUND(COALESCE(SUM(g.weight), 0), 2)                    AS production,
+            ROUND(COALESCE(SUM(g.run_hrs), 0), 2)                   AS running_hours,
+            ROUND(
+                COALESCE(SUM(g.weight), 0)
+                / NULLIF(SUM(g.run_hrs * g.tarprod / 8), 0) * 100,
+            2)                                                      AS eff
+        FROM (
+            SELECT
+                ddt.mc_id,
+                ddt.doff_date,
+                ddt.spell,
+                ddfw.quality_id,
+                CONCAT(
+                    stm.spg_type_name, ' ',
+                    sqm.spg_quality, '-',
+                    sqm.speed, ' ',
+                    sqm.tpi, '-',
+                    sqm.no_of_spindles
+                )                 AS quality,
+                MAX(ddt.wt)       AS weight,
+                MAX(rh.run_hrs)   AS run_hrs,
+                MAX(
+                    (sqm.speed * 480 * sqm.no_of_spindles * sqm.std_count)
+                    / (sqm.tpi * 14400 * 2.20246 * 36)
+                )                 AS tarprod
+            FROM (
+                SELECT
+                    mc_id,
+                    doff_date,
+                    spell,
+                    SUM(net_weight) AS wt
+                FROM daily_doff_tbl
+                WHERE doff_date BETWEEN :from_date AND :to_date
+                GROUP BY mc_id, doff_date, spell
+            ) ddt
+            /* Only spells with recorded VVFD hours — keeps production,
+               hours and eff on the same basis */
+            JOIN (
+                SELECT
+                    mc_id,
+                    tran_date,
+                    spell_id,
+                    SUM(mc_runs_time) AS run_hrs
+                FROM tbl_daily_vvfd_transaction
+                WHERE tran_date BETWEEN :from_date AND :to_date
+                GROUP BY mc_id, tran_date, spell_id
+            ) rh
+                   ON rh.mc_id     = ddt.mc_id
+                  AND rh.tran_date = ddt.doff_date
+                  AND rh.spell_id  = ddt.spell
+            LEFT JOIN daily_doff_frames_winding ddfw
+                   ON ddfw.tran_date = ddt.doff_date
+                  AND ddfw.spell     = ddt.spell
+                  AND ddfw.mc_eb_id  = ddt.mc_id
+                  AND ddfw.spg_wdg   = 'S'
+            LEFT JOIN spinning_quality_mst sqm
+                   ON sqm.spg_quality_mst_id = ddfw.quality_id
+            LEFT JOIN spinning_type_mst stm
+                   ON stm.spg_type_mst_id = sqm.spg_type_id
+            GROUP BY
+                ddt.mc_id,
+                ddt.doff_date,
+                ddt.spell,
+                ddfw.quality_id,
+                CONCAT(
+                    stm.spg_type_name, ' ',
+                    sqm.spg_quality, '-',
+                    sqm.speed, ' ',
+                    sqm.tpi, '-',
+                    sqm.no_of_spindles
+                )
+        ) g
+        LEFT JOIN machine_mst mm ON mm.machine_id = g.mc_id
+        GROUP BY g.mc_id, mm.machine_name, g.quality_id, g.quality
+        ORDER BY mm.machine_name, g.quality
     """
     return text(sql)
