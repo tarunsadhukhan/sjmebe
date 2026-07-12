@@ -215,21 +215,81 @@ def get_spinning_emp_date_query():
     One row per (date, employee). Frontend pivots into date columns with
     Production / Eff sub-columns + Total + Average groups.
 
+    Source:
+      - daily_doff_tbl                  net weight per (mc, date, spell)
+      - daily_doff_frames_winding       spg_wdg = 'S' rows carry the spinning
+                                        operator: mc_eb_id = machine, eb_id =
+                                        operator, quality_id -> tarprod
+      - spinning_quality_mst            target production inputs
+      - hrms_ed_personal_details        employee display name
+
+    eff = SUM(production) / SUM(tarprod) * 100 per (date, employee), using
+    the same tarprod formula as the production-eff report.
+
+    Frames without an operator declaration (eb_id IS NULL) are excluded —
+    their production cannot be attributed to an employee.
+
     Expected projection:
         report_date    (string, dd-mm-YYYY)
         emp_id         int
         emp_name       string
         production     numeric
         eff            numeric
+
+    Parameters: :branch_id (unused — kept consistent with the sibling
+                spinning queries), :from_date, :to_date ('YYYY-MM-DD')
     """
     sql = """
         SELECT
-            DATE_FORMAT(NULL, '%d-%m-%Y') AS report_date,
-            CAST(NULL AS UNSIGNED)        AS emp_id,
-            CAST(NULL AS CHAR)            AS emp_name,
-            0.0                            AS production,
-            0.0                            AS eff
-        WHERE 1 = 0
+            DATE_FORMAT(g.doff_date, '%d-%m-%Y')                   AS report_date,
+            g.eb_id                                                AS emp_id,
+            COALESCE(
+                NULLIF(TRIM(CONCAT(
+                    p.first_name, ' ',
+                    COALESCE(p.middle_name, ''), ' ',
+                    COALESCE(p.last_name, '')
+                )), ''),
+                CONCAT('Emp #', g.eb_id)
+            )                                                      AS emp_name,
+            ROUND(COALESCE(SUM(g.weight), 0), 2)                   AS production,
+            ROUND(
+                COALESCE(SUM(g.weight), 0)
+                / NULLIF(SUM(g.tarprod), 0) * 100,
+            2)                                                     AS eff
+        FROM (
+            SELECT
+                ddt.mc_id,
+                ddt.doff_date,
+                ddt.spell,
+                ddfw.eb_id,
+                MAX(ddt.wt) AS weight,
+                MAX(
+                    (sqm.speed * 480 * sqm.no_of_spindles * sqm.std_count)
+                    / (sqm.tpi * 14400 * 2.20246 * 36)
+                )           AS tarprod
+            FROM (
+                SELECT
+                    mc_id,
+                    doff_date,
+                    spell,
+                    SUM(net_weight) AS wt
+                FROM daily_doff_tbl
+                WHERE doff_date BETWEEN :from_date AND :to_date
+                GROUP BY mc_id, doff_date, spell
+            ) ddt
+            JOIN daily_doff_frames_winding ddfw
+                   ON ddfw.tran_date = ddt.doff_date
+                  AND ddfw.spell     = ddt.spell
+                  AND ddfw.mc_eb_id  = ddt.mc_id
+                  AND ddfw.spg_wdg   = 'S'
+                  AND ddfw.eb_id IS NOT NULL
+            LEFT JOIN spinning_quality_mst sqm
+                   ON sqm.spg_quality_mst_id = ddfw.quality_id
+            GROUP BY ddt.mc_id, ddt.doff_date, ddt.spell, ddfw.eb_id
+        ) g
+        LEFT JOIN hrms_ed_personal_details p ON p.eb_id = g.eb_id
+        GROUP BY g.doff_date, g.eb_id, p.first_name, p.middle_name, p.last_name
+        ORDER BY emp_name, g.doff_date
     """
     return text(sql)
 
