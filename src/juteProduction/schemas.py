@@ -105,6 +105,7 @@ class DrawingDateProductionRow(BaseModel):
     production: float
     issue: float
     closing: float
+    eff: float = 0
 
 
 class DrawingDateProductionResponse(BaseModel):

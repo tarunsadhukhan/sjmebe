@@ -161,9 +161,12 @@ async def bio_emp_link_setup(
                 SELECT
                     p.eb_id,
                     o.emp_code,
-                    CONCAT(p.first_name, ' ', COALESCE(p.middle_name, ''), ' ', COALESCE(p.last_name, '')) AS full_name
+                    CONCAT(p.first_name, ' ', COALESCE(p.middle_name, ''), ' ', COALESCE(p.last_name, '')) AS full_name,
+                    l.tbl_mst_bio_link_id AS link_id,
+                    l.bio_dev_id
                 FROM hrms_ed_personal_details p
                 JOIN hrms_ed_official_details o ON o.eb_id = p.eb_id AND COALESCE(o.active, 1) = 1
+                LEFT JOIN tbl_master_bio_link_mst l ON l.master_id = p.eb_id AND l.match_type = 'E'
                 WHERE COALESCE(p.active, 1) = 1
                   {branch_filter_sql}
                 ORDER BY o.emp_code

@@ -125,13 +125,15 @@ def get_employee_official_by_eb_id():
                CONCAT(sd.sub_dept_desc, ' (', COALESCE(d.dept_desc, ''), ')') AS sub_dept_name,
                des.desig AS designation_name,
                b.branch_name,
-               CONCAT(rp.first_name, ' ', COALESCE(rp.last_name, '')) AS reporting_to_name
+               CONCAT(rp.first_name, ' ', COALESCE(rp.last_name, '')) AS reporting_to_name,
+               bl.bio_data AS bio_link_data
         FROM hrms_ed_official_details o
         LEFT JOIN sub_dept_mst sd ON sd.sub_dept_id = o.sub_dept_id
         LEFT JOIN dept_mst d ON d.dept_id = sd.dept_id
         LEFT JOIN designation_mst des ON des.designation_id = o.designation_id
         LEFT JOIN branch_mst b ON b.branch_id = o.branch_id
         LEFT JOIN hrms_ed_personal_details rp ON rp.eb_id = o.reporting_eb_id
+        LEFT JOIN tbl_master_bio_link_mst bl ON bl.master_id = o.eb_id AND bl.match_type = 'E'
         WHERE o.eb_id = :eb_id AND o.active = 1
     """)
 

@@ -101,7 +101,8 @@ def _upsert_bio_link(db: Session, eb_id: int, emp_code, bio_metric_id) -> None:
             ),
             {**params, "id": existing[0]},
         )
-    else:
+    elif bio_str:
+        # no existing link and no bio id entered → nothing to record
         db.execute(
             text(
                 "INSERT INTO tbl_master_bio_link_mst "
@@ -232,12 +233,20 @@ async def employee_by_id(
         personal_dict = dict(personal._mapping)
         personal_dict.pop("has_photo", None)
 
+        # bio metric id: tbl_master_bio_link_mst is the source of truth
+        # (fall back to the official-details column for legacy rows with no link)
+        official_dict = dict(official._mapping) if official else None
+        if official_dict is not None:
+            link_val = official_dict.pop("bio_link_data", None)
+            if link_val is not None:
+                official_dict["bio_metric_id"] = link_val
+
         return {
             "data": {
                 "personal": personal_dict,
                 "contact": dict(contact._mapping) if contact else None,
                 "address": [dict(r._mapping) for r in addresses],
-                "official": dict(official._mapping) if official else None,
+                "official": official_dict,
                 "bank": dict(bank._mapping) if bank else None,
                 "pf": dict(pf._mapping) if pf else None,
                 "esi": dict(esi._mapping) if esi else None,

@@ -49,7 +49,7 @@ verbt.machine_doff,verbt.doff_wt, verbt.rpm,verbt.eff_100,verbt.actual_eff
 from view_emp_run_brk_trans verbt 
 WHERE verbt.doff_date   BETWEEN :from_date AND :to_date
           AND (:shift_id IS NULL OR verbt.spell_id = :shift_id)
-        ORDER BY doff_date, spell_id, frame_no          
+        ORDER BY doff_date, FIELD(verbt.shift_name, 'A', 'B1', 'B2', 'C'), frame_no
 """
     
     return text(sql)
