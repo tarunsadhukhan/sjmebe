@@ -116,12 +116,16 @@ async def get_admin_tenant_menu_by_roleid(
     tenant_session: Session = Depends(get_tenant_db),  
 ):
     try:
-            # Fetch menus for the given role_id
+            # Fetch menus for the given role_id.
+            # role_menu_map may hold one row per access level for the same menu
+            # (legacy seeding); collapse to the highest, same as the login menu flow.
             menu_query = text("""
-                SELECT mm.menu_id, mm.menu_name, mm.menu_parent_id, rmm.role_id, rmm.access_type_id
-                FROM menu_mst mm 
-                LEFT JOIN role_menu_map rmm 
+                SELECT mm.menu_id, mm.menu_name, mm.menu_parent_id,
+                       MAX(rmm.role_id) AS role_id, MAX(rmm.access_type_id) AS access_type_id
+                FROM menu_mst mm
+                LEFT JOIN role_menu_map rmm
                 ON rmm.menu_id = mm.menu_id AND rmm.role_id = :role_id
+                GROUP BY mm.menu_id, mm.menu_name, mm.menu_parent_id
             """).bindparams(role_id=role_id)
             menu_result = tenant_session.execute(menu_query).fetchall()
             print(f"Menu query returned {len(menu_result)} results")

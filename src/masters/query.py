@@ -1138,6 +1138,56 @@ def check_spinning_quality_exists(
 
 
 # =============================================================================
+# WINDING QUALITY MASTER QUERIES
+# =============================================================================
+
+def get_winding_quality_list():
+    """List winding qualities with optional search."""
+    sql = """
+    SELECT
+      wq.wng_quality_mst_id,
+      wq.wng_quality,
+      wq.target_prod,
+      wq.Spool_cop AS spool_cop,
+      wq.updated_by,
+      wq.updated_date_time
+    FROM winding_quality_master wq
+    WHERE (:search IS NULL OR wq.wng_quality LIKE :search)
+    ORDER BY wq.wng_quality_mst_id DESC
+    """
+    return text(sql)
+
+
+def get_winding_quality_by_id():
+    """Get winding quality details by ID."""
+    sql = """
+    SELECT
+      wq.wng_quality_mst_id,
+      wq.wng_quality,
+      wq.target_prod,
+      wq.Spool_cop AS spool_cop,
+      wq.updated_by,
+      wq.updated_date_time
+    FROM winding_quality_master wq
+    WHERE wq.wng_quality_mst_id = :wng_quality_mst_id
+    """
+    return text(sql)
+
+
+def check_winding_quality_exists(exclude_id: int = None):
+    """Check if a winding quality with the same name + spool/cop already exists."""
+    sql = """
+    SELECT COUNT(*) AS count
+    FROM winding_quality_master
+    WHERE wng_quality = :wng_quality
+      AND COALESCE(Spool_cop, '') = COALESCE(:spool_cop, '')
+    """
+    if exclude_id:
+        sql += " AND wng_quality_mst_id != :exclude_id"
+    return text(sql)
+
+
+# =============================================================================
 # TROLLY MASTER QUERIES
 # =============================================================================
 

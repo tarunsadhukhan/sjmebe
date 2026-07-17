@@ -1,4 +1,12 @@
 import logging
+import sys
+
+# Windows consoles/pipes default to cp1252; the many emoji print()s in route
+# handlers then raise UnicodeEncodeError and turn every request into a 500.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from fastapi import FastAPI, Request
 from src.common.routers import router as common_router
 from src.authorization.routers import common_router as auth_router
@@ -43,6 +51,7 @@ from src.masters.juteMukamMaster import router as jute_mukam_router
 from src.masters.yarnQuality import router as yarn_quality_router
 from src.masters.machineSpgDetails import router as machine_spg_details_router
 from src.masters.spinningQuality import router as spinning_quality_router
+from src.masters.windingQuality import router as winding_quality_router
 from src.masters.trolly import router as trolly_router
 from src.masters.yarnTypeMaster import router as yarn_type_router
 from src.masters.yarnMaster import router as yarn_master_router
@@ -107,9 +116,6 @@ app = FastAPI(title="Vowerp3b API")
 # ✅ Add this to trust NGINX proxy headers (like X-Forwarded-Proto)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 
-# Add CORS middleware
-add_cors_middleware(app)
-
 @app.middleware("http")
 async def catch_exceptions_middleware(request: Request, call_next):
     try:
@@ -118,6 +124,11 @@ async def catch_exceptions_middleware(request: Request, call_next):
     except Exception as e:
         print(f"Global API Error: {e}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+# Add CORS middleware. Registered AFTER the exception middleware so CORS runs
+# outermost — otherwise 500s leave without CORS headers and browsers report
+# them as misleading CORS failures instead of server errors.
+add_cors_middleware(app)
 
 print ('mama')
 app.include_router(common_router, prefix="/api/common", tags=["Common"])
@@ -153,6 +164,7 @@ app.include_router(jute_mukam_router, prefix="/api/juteMukamMaster", tags=["mast
 app.include_router(yarn_quality_router, prefix="/api/yarnQualityMaster", tags=["masters-yarn-quality"])
 app.include_router(machine_spg_details_router, prefix="/api/machineSpgDetailsMaster", tags=["masters-machine-spg-details"])
 app.include_router(spinning_quality_router, prefix="/api/spinningQualityMaster", tags=["masters-spinning-quality"])
+app.include_router(winding_quality_router, prefix="/api/windingQualityMaster", tags=["masters-winding-quality"])
 app.include_router(trolly_router, prefix="/api/trollyMaster", tags=["masters-trolly"])
 
 app.include_router(yarn_type_router, prefix="/api/yarnTypeMaster", tags=["masters-yarn-type"])

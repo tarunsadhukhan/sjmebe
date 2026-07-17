@@ -216,13 +216,16 @@ async def compmenuitems(
                     "menus": {},
                 },
             )
-            branch_entry["menus"][menu_id] = {
-                "menu_id": menu_id,
-                "menu_name": row.menu_name,
-                "menu_path": menu_path,
-                "menu_parent_id": menu_parent_id,
-                "access_type_id": access_type_id,
-            }
+            # One row per access level comes back for the same menu; keep the highest
+            existing_menu = branch_entry["menus"].get(menu_id)
+            if existing_menu is None or (access_type_id or 0) > (existing_menu["access_type_id"] or 0):
+                branch_entry["menus"][menu_id] = {
+                    "menu_id": menu_id,
+                    "menu_name": row.menu_name,
+                    "menu_path": menu_path,
+                    "menu_parent_id": menu_parent_id,
+                    "access_type_id": access_type_id,
+                }
 
         result = []
         for company in companies.values():

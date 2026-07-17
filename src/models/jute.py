@@ -124,6 +124,24 @@ class SpinningQualityMst(Base):
 
 
 # =============================================================================
+# WINDING QUALITY MASTER
+# =============================================================================
+
+class WindingQualityMst(Base):
+    """Winding quality master table - stores winding quality specifications."""
+    __tablename__ = "winding_quality_master"
+
+    wng_quality_mst_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    wng_quality: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    target_prod: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    spool_cop: Mapped[Optional[str]] = mapped_column("Spool_cop", String(1), nullable=True)
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[datetime] = mapped_column(
+        TIMESTAMP, nullable=False, server_default=func.current_timestamp()
+    )
+
+
+# =============================================================================
 # TROLLY MASTER
 # =============================================================================
 
