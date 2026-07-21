@@ -3348,11 +3348,13 @@ _DELETE_DAILY_BASIC_SQL = text(
 
 # Defensive migration: add break_minutes to a daily_attendance_basic that was
 # created before this column existed. CREATE TABLE IF NOT EXISTS won't add it.
-# IF NOT EXISTS on ADD COLUMN is MySQL 8.0.29+/MariaDB 10.0+; failures are
-# swallowed by the caller (column already present, or older server).
+# No IF NOT EXISTS: Oracle MySQL doesn't support it on ADD COLUMN (MariaDB-only
+# syntax — on MySQL the ALTER always errored and the column was never added).
+# Once the column exists this raises 1060 (duplicate column), which the caller
+# swallows.
 _ADD_BREAK_COL_SQL = text(
     "ALTER TABLE daily_attendance_basic "
-    "ADD COLUMN IF NOT EXISTS break_minutes INT NOT NULL DEFAULT 0 "
+    "ADD COLUMN break_minutes INT NOT NULL DEFAULT 0 "
     "AFTER ot_minutes"
 )
 
