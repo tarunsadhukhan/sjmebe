@@ -1,0 +1,18 @@
+services:
+  vowerp-backend:
+    image: ghcr.io/tarunsadhukhan/sjmebe:latest
+    build:
+      context: .
+    container_name: vowerp-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+    networks:
+      - vowerp
+
+networks:
+  vowerp:
+    external: true
