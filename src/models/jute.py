@@ -16,6 +16,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
     TIMESTAMP,
@@ -1015,3 +1016,765 @@ class AssortingEntry(Base):
     gross_weight: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     tare_wt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     net_wt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+class JuteSqcSpreaderRollWt(Base):
+    """R-08-04 Spreader Roll Weight entry.
+
+    Morrah-shaped: flat header + JSON-as-string readings (String(500) +
+    json.dumps/json.loads) + persisted calc_*/band columns. Insert-only +
+    compute-on-read. std_mr_pct and band edges are snapshotted at save time.
+    """
+    __tablename__ = "jute_sqc_spreader_roll_wt"
+    __table_args__ = {"extend_existing": True}
+
+    spreader_roll_wt_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    spell_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    feeder_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    roll_weights: Mapped[str] = mapped_column(String(500), nullable=False)
+    mr_pcts: Mapped[str] = mapped_column(String(500), nullable=False)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_avg_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_avg_obs: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_avg_corr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_stdev_obs: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    calc_stdev_corr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    calc_cv_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 4), nullable=True)
+    band_counts_obs: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    band_counts_corr: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+# =============================================================================
+# JUTE SQC SPREADER ROLL SLIVER WEIGHT QC (R-08-03)
+# =============================================================================
+
+class JuteSqcSpreaderSliverWt(Base):
+    """R-08-03 Spreader Roll Sliver Weight entry.
+
+    Morrah-shaped: flat header + JSON-as-string readings (String(500) +
+    json.dumps/json.loads) + persisted calc_* columns. Insert-only +
+    compute-on-read. std_mr_pct is snapshotted at save time. Variable 1-12
+    readings (observed_weights / mr_pcts parallel JSON); NO weight bands.
+    Units are lb/100yds; sample_length_yds (default 5) and weight_basis
+    ("LB/100YDS") are nullable header constants. category is nullable free-text
+    (no master). Lockstep with create_jute_sqc_spreader_sliver_wt.sql.
+    """
+    __tablename__ = "jute_sqc_spreader_sliver_wt"
+    __table_args__ = {"extend_existing": True}
+
+    spreader_sliver_wt_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    spell_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sample_length_yds: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    weight_basis: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    observed_weights: Mapped[str] = mapped_column(String(500), nullable=False)
+    mr_pcts: Mapped[str] = mapped_column(String(500), nullable=False)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_avg_obs: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_avg_corr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_avg_mr: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_stdev: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    calc_cv_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 4), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+# =============================================================================
+# JUTE SPREADER QUALITY STANDARDS SATELLITE (R-08-04)
+# =============================================================================
+
+class JuteSpreaderQualityAttr(Base):
+    """Per-raw-jute-quality standards satellite for spreader SQC.
+
+    item_id-keyed; mirrors jute_yarn_mst's role for spinning. std_mr_pct is
+    nullable — the backend falls back to base 16 when absent. std_roll_wt is
+    optional/unused until needed. Standards live HERE, NOT on item_mst.
+    """
+    __tablename__ = "jute_spreader_quality_attr"
+    __table_args__ = {"extend_existing": True}
+
+    spreader_quality_attr_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    item_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_roll_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+# =============================================================================
+# JUTE DRAW QUALITY STANDARDS SATELLITE (carding/drawing family; R-08-05/06/07)
+# =============================================================================
+
+class JuteDrawQualityStd(Base):
+    """Per-(line-quality, process) standards satellite for the carding/drawing family.
+
+    Unlike jute_spreader_quality_attr (item_id-keyed only), the SAME line quality
+    carries a DIFFERENT band/MR at breaker vs inter vs drawhead vs finisher, so this
+    satellite is keyed (item_id, process). std_mr_pct + std_cv_low/high are the printed
+    STD MR% / STD CV% band; std_weight/std_wt_tol are an optional sliver-weight target
+    (unused at breaker, present for downstream stages). ALL std columns are NULLABLE with
+    code fallbacks: std MR -> 16; CV pass/fail only when a band is seeded (else NULL).
+    Standards live HERE, NOT on item_mst. Lockstep with create_jute_draw_quality_std.sql.
+    """
+    __tablename__ = "jute_draw_quality_std"
+    __table_args__ = {"extend_existing": True}
+
+    draw_quality_std_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    item_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    process: Mapped[str] = mapped_column(String(30), nullable=False)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    std_wt_tol: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+# =============================================================================
+# JUTE SQC BREAKER CARD SLIVER WEIGHT QC (R-08-05/06/07, carding stage)
+# =============================================================================
+
+class JuteSqcBreakerCardSwt(Base):
+    """R-08-05/06/07 Breaker Card (Coarse Side SWT) entry.
+
+    Flat row-per-reading-set (one save inserts SEVERAL rows — the day's grid). Mirrors
+    JuteSqcSpreaderSliverWt: flat header + JSON-as-string readings (String(500) +
+    json.dumps/json.loads) + persisted calc_* columns. Insert-only + compute-on-read.
+    Each row = one (machine, spell, quality) reading-set with EXACTLY 4 cut weights +
+    4 MR%. std_mr_pct + std_cv_low/high are snapshotted from jute_draw_quality_std at
+    (item_id, process='BREAKER') save time; std MR falls back to 16. cv_within_band is
+    the computed pass flag (NULL when no band seeded). weights are LB per 5 yds. card_side
+    defaults 'COARSE' for the future fine-side variant. The per-quality GRAND AVERAGE is
+    recomputed at read from these rows — NOT stored. Lockstep with
+    create_jute_sqc_breaker_card_swt.sql.
+    """
+    __tablename__ = "jute_sqc_breaker_card_swt"
+    __table_args__ = {"extend_existing": True}
+
+    breaker_card_swt_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    spell_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    batch_plan_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    card_side: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, server_default="COARSE")
+    weights: Mapped[str] = mapped_column(String(500), nullable=False)
+    mr_pcts: Mapped[str] = mapped_column(String(500), nullable=False)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_corr_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_sdev: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    calc_cv_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 4), nullable=True)
+    cv_within_band: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+# =============================================================================
+# JUTE SQC CARD SLIVER WEIGHT QC (R-08-07A, carding stage — inter/tow/hopper)
+# =============================================================================
+
+class JuteSqcCardSliverWt(Base):
+    """R-08-07A Inter Card & Tow Breaker Sliver Weight entry.
+
+    Clone of JuteSqcBreakerCardSwt with ONE delta: card_side -> section. Same flat
+    row-per-reading-set (one save inserts SEVERAL rows — the day's grid), JSON-as-string
+    readings (String(500) + json.dumps/json.loads), persisted calc_* columns, insert-only +
+    compute-on-read. Each row = one (section, machine, spell, quality) reading-set with
+    EXACTLY 4 cut weights + 4 MR%. `section` (INTER_CARD | TOW_BREAKER | HOPPER) is BOTH the
+    stored sub-table label AND the (item_id, process) key into jute_draw_quality_std — the
+    SAME line quality carries a different STD MR%/CV band per carding sub-process. std_mr_pct
+    + std_cv_low/high are snapshotted from the satellite at (item_id, process=section) save
+    time; std MR falls back to 20. cv_within_band is the computed pass flag (NULL when no band
+    seeded). weights are LB per 5 yds. Section AVG + per-quality GRAND AVERAGE are recomputed
+    at read — NOT stored. Lockstep with create_jute_sqc_card_sliver_wt.sql.
+    """
+    __tablename__ = "jute_sqc_card_sliver_wt"
+    __table_args__ = {"extend_existing": True}
+
+    card_sliver_wt_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    section: Mapped[str] = mapped_column(String(20), nullable=False)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    spell_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    batch_plan_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    weights: Mapped[str] = mapped_column(String(500), nullable=False)
+    mr_pcts: Mapped[str] = mapped_column(String(500), nullable=False)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_corr_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_sdev: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    calc_cv_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 4), nullable=True)
+    cv_within_band: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcFinDrawSliverWt(Base):
+    """R-08-12/13/14 Finisher Drawing Sliver Weight entry.
+
+    Clone of JuteSqcCardSliverWt with ONE extra column: dlv_nos (a JSON array of 4 delivery
+    numbers, ints or null, stored String(500) + json.dumps/json.loads). Sections HESS / SWP /
+    SWT. Same flat row-per-reading-set (one save inserts SEVERAL rows — the day's grid),
+    persisted calc_* columns, insert-only + compute-on-read. Each row = one (section, machine,
+    spell, batch) reading-set with EXACTLY 4 cut weights + 4 MR%. Quality is linked to a BATCH
+    (jute_batch_plan), so there is no single (item_id, process) std row: std MR is fixed at 16
+    (drawing default) and the CV band stays unevaluated (cv_within_band NULL). weights are LB
+    per 5 yds. Section AVG + per-batch GRAND AVERAGE are recomputed at read — NOT stored.
+    Lockstep with create_jute_sqc_fin_draw_sliver_wt.sql.
+    """
+    __tablename__ = "jute_sqc_fin_draw_sliver_wt"
+    __table_args__ = {"extend_existing": True}
+
+    fin_draw_sliver_wt_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    section: Mapped[str] = mapped_column(String(10), nullable=False)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    spell_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    batch_plan_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    weights: Mapped[str] = mapped_column(String(500), nullable=False)
+    mr_pcts: Mapped[str] = mapped_column(String(500), nullable=False)
+    dlv_nos: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_corr_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_sdev: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    calc_cv_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 4), nullable=True)
+    cv_within_band: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcDrawSliverWt(Base):
+    """R-08-08/09/10 Drawhead + Finisher Card Sliver Weight entry.
+
+    Clone of JuteSqcCardSliverWt with ONE extra column: time_band (MORNING / AFTERNOON sheet
+    header, String(10), nullable). Sections DRAWHEAD_SWT / DRAWHEAD_SWP / FINISHER_CARD. Same
+    flat row-per-reading-set, persisted calc_* columns, insert-only + compute-on-read. Each row
+    = one (section, time_band, machine, spell, batch) reading-set with EXACTLY 4 cut weights +
+    4 MR%. Quality is linked to a BATCH (jute_batch_plan): std MR fixed at 16 (drawing default),
+    CV band unevaluated (cv_within_band NULL). weights are LB per 5 yds. Section AVG + per-batch
+    GRAND AVERAGE recomputed at read — NOT stored. Lockstep with
+    create_jute_sqc_draw_sliver_wt.sql.
+    """
+    __tablename__ = "jute_sqc_draw_sliver_wt"
+    __table_args__ = {"extend_existing": True}
+
+    draw_sliver_wt_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    section: Mapped[str] = mapped_column(String(20), nullable=False)
+    time_band: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    spell_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    batch_plan_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    weights: Mapped[str] = mapped_column(String(500), nullable=False)
+    mr_pcts: Mapped[str] = mapped_column(String(500), nullable=False)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_cv_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_corr_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_sdev: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    calc_cv_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 4), nullable=True)
+    cv_within_band: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+# =============================================================================
+# JUTE SQC BEAM MR% QC (R-08-18)
+# =============================================================================
+
+class JuteSqcBeamMr(Base):
+    """R-08-18 Beam MR% — warp-beam moisture-regain QC.
+
+    Morrah-shaped flat header: one row per (entry_date, quality_group, beam machine) reading
+    set. readings = JSON string of EXACTLY 5 MR% numbers (String(200) + json.dumps/json.loads).
+    calc_avg_mr = mean of the 5, computed at save. std_mr_pct defaults by quality_group
+    (HESSIAN 16 / SACKING 20) but is editable on the form and snapshotted here. deviation
+    (avg_mr - std_mr_pct) and per-group overall_avg_mr are computed on read, NOT stored. No
+    CV%, no pass/fail band. Lockstep with create_jute_sqc_beam_mr.sql.
+    """
+    __tablename__ = "jute_sqc_beam_mr"
+    __table_args__ = {"extend_existing": True}
+
+    beam_mr_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    quality_group: Mapped[str] = mapped_column(String(20), nullable=False)
+    spell_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    readings: Mapped[str] = mapped_column(String(200), nullable=False)
+    calc_avg_mr: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcPackingMr(Base):
+    """R-08-25 Packing MR% — finished-goods moisture at packing.
+
+    Morrah-shaped flat header: one row per (entry_date, quality column) reading set.
+    readings = JSON string of EXACTLY 10 MR% numbers (String(500) + json.dumps/json.loads).
+    calc_avg_mr = mean of the 10, computed at save. quality_group (HESSIAN / SACKING) drives
+    the by_date roll-up. item_id is an OPTIONAL JUTE CLOTH link (item_type_id=5); quality_label
+    snapshots its name; construction_code is free text. No std, no CV%, no MR correction, no
+    pass/fail (averages only). group_avg_mr (weighted mean of all readings per group) is
+    computed on read, NOT stored. Lockstep with create_jute_sqc_packing_mr.sql.
+    """
+    __tablename__ = "jute_sqc_packing_mr"
+    __table_args__ = {"extend_existing": True}
+
+    packing_mr_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    quality_group: Mapped[str] = mapped_column(String(20), nullable=False)
+    quality_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    construction_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    readings: Mapped[str] = mapped_column(String(500), nullable=False)
+    calc_avg_mr: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 3), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcStitch(Base):
+    """R-08-22 Stitch SQC — finishing-stage sewing-stitch-density QC.
+
+    Morrah-shaped flat header: one row per (entry_date, sewing machine) reading set.
+    readings = JSON string of EXACTLY 5 stitch counts (stitches/dm); calc_avg = mean of
+    the 5, computed at save. std_stitch is a fixed mill standard (9 stitches/dm) prefilled
+    on the form, editable, and snapshotted here. flag (OK / LOW / HIGH) is computed on
+    read, NOT stored. No quality column (machine-only report), no CV%, no MR correction.
+    Lockstep with create_jute_sqc_stitch.sql.
+    """
+    __tablename__ = "jute_sqc_stitch"
+    __table_args__ = {"extend_existing": True}
+
+    stitch_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    std_stitch: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    readings: Mapped[str] = mapped_column(String(200), nullable=False)
+    calc_avg: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    inspector_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcFabricConstruction(Base):
+    """R-08-19 Fabric Construction — woven hessian cloth construction audit (header).
+
+    One row per saved quality block: the cloth quality (item_id, item_type_id=5) plus the
+    6 per-quality STANDARDS snapshotted at save (std_length_yds, std_width_cms, std_ends_dm,
+    std_picks_dm, std_mr_pct, std_oz_per_yd). Sample rows hang off the _dtl table. The by_date
+    summary (per-column AVG + Std-vs-Actual deviation) is computed on read, NOT stored.
+    Lockstep with create_jute_sqc_fabric_construction.sql.
+    """
+    __tablename__ = "jute_sqc_fabric_construction"
+    __table_args__ = {"extend_existing": True}
+
+    fabric_const_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    quality_text: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    std_length_yds: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    std_width_cms: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    std_ends_dm: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    std_picks_dm: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    std_oz_per_yd: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcFabricConstructionDtl(Base):
+    """R-08-19 Fabric Construction — one sample row (up to 5 per header).
+
+    6 MEASURED inputs (length_yds, width_cms, ends_per_dm, picks_per_dm, mr_pct, obs_wt_kg)
+    plus 2 server-computed per-row values stored at save:
+      obs_ozs   = (obs_wt_kg * 1000 / 28.3495) / length_yds
+      crcted_oz = obs_ozs * (100 + std_mr_pct) / (100 + mr_pct)
+    Lockstep with create_jute_sqc_fabric_construction.sql.
+    """
+    __tablename__ = "jute_sqc_fabric_construction_dtl"
+    __table_args__ = {"extend_existing": True}
+
+    fabric_const_dtl_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fabric_const_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    sl: Mapped[int] = mapped_column(Integer, nullable=False)
+    length_yds: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    width_cms: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    ends_per_dm: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    picks_per_dm: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    obs_wt_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    obs_ozs: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    crcted_oz: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+
+
+class JuteSqcWidthPicks(Base):
+    """R-08-21 Width and Picks — on-loom dimensional QC of woven cloth (header).
+
+    One row per saved (entry_date, cloth-quality) group: the cloth quality (item_id,
+    item_type_id=5) plus std_width_cm and std_picks SNAPSHOTTED at save (entered/editable
+    on the form, NO change to any item master) and an optional inspector_name. Loom reading
+    rows hang off the _dtl table. Width and Picks summaries are computed on read, NOT stored.
+    Lockstep with create_jute_sqc_width_picks.sql.
+    """
+    __tablename__ = "jute_sqc_width_picks"
+    __table_args__ = {"extend_existing": True}
+
+    width_picks_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    std_width_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    std_picks: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    inspector_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcWidthPicksDtl(Base):
+    """R-08-21 Width and Picks — one loom reading row.
+
+    loom_id is the WEAVING (Loom) machine; width_cm is required per row; picks_dm is
+    OPTIONAL (only a sampled subset of looms is pick-checked). Width/Picks summaries are
+    computed on read. Lockstep with create_jute_sqc_width_picks.sql.
+    """
+    __tablename__ = "jute_sqc_width_picks_dtl"
+    __table_args__ = {"extend_existing": True}
+
+    width_picks_dtl_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    width_picks_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    loom_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    width_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    picks_dm: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+
+
+class JuteSqcFabricFault(Base):
+    """R-08-28 Fabric Fault — weaving woven-cloth defect tally.
+
+    Flat single-table morrah pattern (NO detail table). ONE row = ONE inspected piece
+    (one loom/cloth column): header (entry_date, spell, cloth quality, loom, date_of_weaving,
+    remarks, inspector) plus a FIXED 15-fault checklist of integer counts stored as a JSON
+    string of 15 ints (FABRIC_FAULT_TYPES order; most counts are 0). calc_piece_total =
+    sum of the 15 counts, computed at save. The DAY roll-up (per-fault totals + scores,
+    grand total + score) is computed on read, NOT stored. spell_id / item_id / loom_id are
+    all nullable but normally selected. Lockstep with create_jute_sqc_fabric_fault.sql.
+    """
+    __tablename__ = "jute_sqc_fabric_fault"
+    __table_args__ = {"extend_existing": True}
+
+    fabric_fault_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    spell_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    loom_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    date_of_weaving: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    fault_counts: Mapped[str] = mapped_column(String(500), nullable=False)
+    calc_piece_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    remarks: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    inspector_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcCuttingLength(Base):
+    """R-08-20 Cutting Length — daily cut-piece length consistency.
+
+    Flat single-table morrah pattern (NO detail table). One row per (entry_date)
+    reading-set carries EXACTLY 20 cut-length readings in inches as a JSON string
+    (readings String(500) + json.dumps / json.loads). std_length is entered on the
+    form (prefilled 78, editable) and snapshotted here. avg / sample stdev (n-1) /
+    cv_pct / deviation (avg - std_length) are computed at save and stored. Optional
+    cloth quality link = JUTE CLOTH item (item_type_id=5), nullable. No MR correction,
+    no pass/fail band. Lockstep with create_jute_sqc_cutting_length.sql.
+    """
+    __tablename__ = "jute_sqc_cutting_length"
+    __table_args__ = {"extend_existing": True}
+
+    cutting_length_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    std_length: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    readings: Mapped[str] = mapped_column(String(500), nullable=False)
+    calc_avg: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    calc_stdev: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    calc_cv_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    calc_deviation: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 3), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcBagWeight(Base):
+    """R-08-23 Bag Weight — finished-bag weight control.
+
+    Flat single-table morrah pattern (NO detail table). One row per (entry_date,
+    bag type) block carries N reading rows (up to 24, variable >=1) as a JSON string
+    array of objects {mr, obs} (readings String(2000) + json.dumps / json.loads).
+    std_bag_weight + std_mr_pct are entered on the form (std_mr_pct prefills 20 for
+    jute bags, editable) and snapshotted here. Per-row corr = obs * (100 + std_mr_pct)
+    / (100 + mr). Block stats — avg_mr / avg_obs / row-wise avg_corr / sample stdev of
+    obs (n-1) / cv_pct / observed & corrected heavy-light percents — are computed at
+    save and stored. Bag type link = JUTE CLOTH item (item_type_id=5), nullable.
+    Lockstep with create_jute_sqc_bag_weight.sql.
+    """
+    __tablename__ = "jute_sqc_bag_weight"
+    __table_args__ = {"extend_existing": True}
+
+    bag_weight_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bag_type_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    std_bag_weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    readings: Mapped[str] = mapped_column(String(2000), nullable=False)
+    calc_avg_mr: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 3), nullable=True)
+    calc_avg_obs_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    calc_avg_corr_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    calc_obs_stdev: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 3), nullable=True)
+    calc_obs_cv_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    calc_obs_hy_lt_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    calc_corr_hy_lt_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcEmulsion(Base):
+    """R-08-02 Emulsion — daily batching jute-oil emulsion recipe log.
+
+    Flat single-table, ONE row per (entry_date) save: recipe header + additive columns.
+    NO readings array, NO StDev/CV (a recipe log, not a sampled QC report).
+    oil_pct_in_emulsion is a MEASURED/typed input. std_oil_pct_low/high is the target band
+    (prefilled 16/17, editable, snapshotted at save). theoretical_oil_pct
+    (= oil_used_ltr / tank_capacity_ltr * 100) and oil_pct_status (OK/LOW/HIGH vs the band)
+    are computed server-side on read, NOT stored. Lockstep with create_jute_sqc_emulsion.sql.
+    """
+    __tablename__ = "jute_sqc_emulsion"
+    __table_args__ = {"extend_existing": True}
+
+    emulsion_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    oil_used_ltr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    tank_capacity_ltr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    oil_pct_in_emulsion: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_oil_pct_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    std_oil_pct_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    adco_used_ml: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    eco_fin_used_ltr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    p40_gms: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    efjl_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    glycerine_gms: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    castrol_oil: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    diesel_ltr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    citric_acid_ltr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    enzyme_gms: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    treated_water_ltr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    rbo_ltr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    jbo_ltr: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    molasses_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    urea_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    biochemical_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    jsp66: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    feel_free_good_ve_kg: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    spreader_rolls_made: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    others: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    prepared_by: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcBagCheck(Base):
+    """R-08-24 Bag Checking — finished-bag acceptance inspection (header).
+
+    One row per saved (entry_date, bag type) block: the bag type (item_id, item_type_id=5,
+    nullable) plus free-text vendor_name / id_code (no master) and the 7 per-quality STANDARDS
+    snapshotted at save (std_bag_weight, std_length, std_width, std_ends, std_picks, std_stitch,
+    std_mr_pct — std_mr_pct prefills 20, all editable). Per-bag rows hang off the _dtl table.
+    Block aggregates (per-column avg / SAMPLE stdev / cv% / min / max + obs & corr heavy-light
+    percents) are computed on read, NOT stored. bag_type_label is String(255) (real bag item
+    names run ~150 chars). Lockstep with create_jute_sqc_bag_check.sql.
+    """
+    __tablename__ = "jute_sqc_bag_check"
+    __table_args__ = {"extend_existing": True}
+
+    bag_check_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bag_type_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    vendor_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    id_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    std_bag_weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    std_length: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    std_width: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    std_ends: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    std_picks: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    std_stitch: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )
+
+
+class JuteSqcBagCheckDtl(Base):
+    """R-08-24 Bag Checking — one per-bag inspection row (variable count, >=1 per header).
+
+    7 MEASURED inputs (length_cm, width_cm, ends_dm, picks_dm, mr_pct, bag_wt_gm, stitch_dm)
+    plus optional free-text defects and one server-computed value stored at save:
+      corr_wt_gm = bag_wt_gm * (100 + std_mr_pct) / (100 + mr_pct)
+    Lockstep with create_jute_sqc_bag_check.sql.
+    """
+    __tablename__ = "jute_sqc_bag_check_dtl"
+    __table_args__ = {"extend_existing": True}
+
+    bag_check_dtl_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bag_check_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    sl_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    length_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    width_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    ends_dm: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    picks_dm: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    bag_wt_gm: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    stitch_dm: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    defects: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    corr_wt_gm: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+
+
+class JuteSqcHumidity(Base):
+    """Humidity Recording — plant-wide department temperature / RH log.
+
+    Flat single-table morrah/bag_weight pattern (NO detail table). One row per saved
+    (report_date, dept, round) reading-set carries 1..3 SPOT readings as a JSON string
+    array of objects {spot_label, reading_time, temp_c, rh_pct} (spots String(1000) +
+    json.dumps / json.loads). round_no 1=Morning, 2=Noon, 3=Evening. avg_temp =
+    mean(temp_c over spots), avg_rh = mean(rh_pct over spots), both computed server-side
+    at save and stored (2dp). No StDev/CV, no band/status (averages only). Coexists with
+    the spinning RHMR report (JuteSqcSpinningRhmr); does NOT supersede it.
+    Lockstep with create_jute_sqc_humidity.sql.
+    """
+    __tablename__ = "jute_sqc_humidity"
+    __table_args__ = {"extend_existing": True}
+
+    humidity_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    co_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    dept_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    round_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    spots: Mapped[str] = mapped_column(String(1000), nullable=False)
+    calc_avg_temp: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    calc_avg_rh: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    prepared_by: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.current_timestamp()
+    )

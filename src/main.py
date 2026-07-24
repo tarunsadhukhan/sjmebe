@@ -80,6 +80,32 @@ from src.juteProduction.windingReports import router as winding_reports_router
 from src.juteProduction.otherReports import router as other_reports_router
 from src.juteProduction.balesReports import router as bales_reports_router
 from src.juteSQC.morrahWeight import router as morrah_wt_router
+from src.juteSQC.spreader_roll_wt import router as spreader_roll_wt_router
+from src.juteSQC.spreader_sliver_wt import router as spreader_sliver_wt_router
+from src.juteSQC.breaker_card_swt import router as breaker_card_swt_router
+from src.juteSQC.card_sliver_wt import router as card_sliver_wt_router
+from src.juteSQC.fin_draw_sliver_wt import router as fin_draw_sliver_wt_router
+from src.juteSQC.draw_sliver_wt import router as draw_sliver_wt_router
+from src.juteSQC.spinning_sqc import router as spinning_sqc_router
+from src.juteSQC.yarn_tpi import router as yarn_tpi_router
+from src.juteSQC.qr_cv_15a import router as qr_cv_15a_router
+from src.juteSQC.finishing_sqc import router as finishing_sqc_router
+from src.juteSQC.weaving_sqc import router as weaving_sqc_router
+from src.juteSQC.beam_mr import router as beam_mr_router
+from src.juteSQC.fabric_construction import router as fabric_construction_router
+from src.juteSQC.cutting_length import router as cutting_length_router
+from src.juteSQC.width_picks import router as width_picks_router
+from src.juteSQC.stitch import router as stitch_router
+from src.juteSQC.bag_weight import router as bag_weight_router
+from src.juteSQC.bag_check import router as bag_check_router
+from src.juteSQC.packing_mr import router as packing_mr_router
+from src.juteSQC.fabric_fault import router as fabric_fault_router
+from src.juteSQC.emulsion import router as emulsion_router
+from src.juteSQC.humidity import router as humidity_router
+from src.juteProduction.spng_target_map import router as spng_target_map_router
+from src.juteProduction.beaming_target_map import router as beaming_target_map_router
+from src.juteProduction.finishing_target_map import router as finishing_target_map_router
+from src.juteProduction.weaving_target_map import router as weaving_target_map_router
 from src.sales.quotation import router as quotation_router
 from src.sales.salesOrder import router as sales_order_router
 from src.sales.deliveryOrder import router as delivery_order_router
@@ -207,6 +233,34 @@ app.include_router(bales_reports_router, prefix="/api/balesReports", tags=["jute
 
 # Jute SQC routers
 app.include_router(morrah_wt_router, prefix="/api/juteSQC", tags=["jute-sqc-morrah-weight"])
+app.include_router(spreader_roll_wt_router, prefix="/api/juteSQC", tags=["jute-sqc-spreader-roll-weight"])
+app.include_router(spreader_sliver_wt_router, prefix="/api/juteSQC", tags=["jute-sqc-spreader-sliver-weight"])
+app.include_router(breaker_card_swt_router, prefix="/api/juteSQC", tags=["jute-sqc-breaker-card"])
+app.include_router(card_sliver_wt_router, prefix="/api/juteSQC", tags=["jute-sqc-card-sliver"])
+app.include_router(fin_draw_sliver_wt_router, prefix="/api/juteSQC", tags=["jute-sqc-fin-draw"])
+app.include_router(draw_sliver_wt_router, prefix="/api/juteSQC", tags=["jute-sqc-draw"])
+app.include_router(spinning_sqc_router, prefix="/api/juteSQC", tags=["jute-sqc-spinning"])
+app.include_router(yarn_tpi_router, prefix="/api/juteSQC", tags=["jute-sqc-yarn-tpi"])
+app.include_router(qr_cv_15a_router, prefix="/api/juteSQC", tags=["jute-sqc-qr-cv-15a"])
+app.include_router(finishing_sqc_router, prefix="/api/juteSQC", tags=["jute-sqc-finishing"])
+app.include_router(weaving_sqc_router, prefix="/api/juteSQC", tags=["jute-sqc-weaving"])
+app.include_router(beam_mr_router, prefix="/api/juteSQC", tags=["jute-sqc-beam-mr"])
+app.include_router(fabric_construction_router, prefix="/api/juteSQC", tags=["jute-sqc-fabric-construction"])
+app.include_router(cutting_length_router, prefix="/api/juteSQC", tags=["jute-sqc-cutting-length"])
+app.include_router(width_picks_router, prefix="/api/juteSQC", tags=["jute-sqc-width-picks"])
+app.include_router(stitch_router, prefix="/api/juteSQC", tags=["jute-sqc-stitch"])
+app.include_router(bag_weight_router, prefix="/api/juteSQC", tags=["jute-sqc-bag-weight"])
+app.include_router(bag_check_router, prefix="/api/juteSQC", tags=["jute-sqc-bag-check"])
+app.include_router(packing_mr_router, prefix="/api/juteSQC", tags=["jute-sqc-packing-mr"])
+app.include_router(fabric_fault_router, prefix="/api/juteSQC", tags=["jute-sqc-fabric-fault"])
+app.include_router(emulsion_router, prefix="/api/juteSQC", tags=["jute-sqc-emulsion"])
+app.include_router(humidity_router, prefix="/api/juteSQC", tags=["jute-sqc-humidity"])
+
+# Jute production target-map routers (used by SQC pages + planning grids)
+app.include_router(spng_target_map_router, prefix="/api/spngTargetMap", tags=["spng-target-map"])
+app.include_router(beaming_target_map_router, prefix="/api/beamingTargetMap", tags=["jute-beaming-targets"])
+app.include_router(finishing_target_map_router, prefix="/api/finishingTargetMap", tags=["jute-finishing-targets"])
+app.include_router(weaving_target_map_router, prefix="/api/weavingTargetMap", tags=["jute-weaving-targets"])
 
 # Inventory routers
 app.include_router(issue_router, prefix="/api/inventoryIssue", tags=["inventory-issue"])
