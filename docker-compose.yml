@@ -13,6 +13,19 @@ services:
     networks:
       - vowerp
 
+  vowerp-scheduler:
+    image: ghcr.io/tarunsadhukhan/sjmebe:latest
+    container_name: vowerp-scheduler
+    restart: unless-stopped
+    command: uvicorn src.scheduler_main:app --host 0.0.0.0 --port 48480
+    ports:
+      - "48480:48480"
+    env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+    networks:
+      - vowerp
+
 networks:
   vowerp:
     external: true
