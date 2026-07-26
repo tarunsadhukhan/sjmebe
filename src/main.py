@@ -55,6 +55,7 @@ from src.masters.windingQuality import router as winding_quality_router
 from src.masters.trolly import router as trolly_router
 from src.masters.selector import router as selector_router
 from src.masters.juteQualityEntry import router as jute_quality_entry_router
+from src.utilities.backup import router as db_backup_router
 from src.masters.yarnTypeMaster import router as yarn_type_router
 from src.masters.yarnMaster import router as yarn_master_router
 from src.masters.batchPlanMaster import router as batch_plan_master_router
@@ -196,6 +197,7 @@ app.include_router(winding_quality_router, prefix="/api/windingQualityMaster", t
 app.include_router(trolly_router, prefix="/api/trollyMaster", tags=["masters-trolly"])
 app.include_router(selector_router, prefix="/api/selectorMaster", tags=["masters-selector"])
 app.include_router(jute_quality_entry_router, prefix="/api/juteQualityEntry", tags=["masters-jute-quality-entry"])
+app.include_router(db_backup_router, prefix="/api/utilities", tags=["utilities"])
 
 app.include_router(yarn_type_router, prefix="/api/yarnTypeMaster", tags=["masters-yarn-type"])
 app.include_router(yarn_master_router, prefix="/api/yarnMaster", tags=["masters-yarn"])
