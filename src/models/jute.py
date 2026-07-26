@@ -162,6 +162,23 @@ class TrollyMst(Base):
     )
 
 
+class SelectorMst(Base):
+    """Selector master table - self-referencing hierarchy via under_selectror_master."""
+    __tablename__ = "tbl_selector_mst"
+
+    tbl_selector_mst_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    selector_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    selector_shr_name: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[datetime] = mapped_column(
+        TIMESTAMP, nullable=False, server_default=func.current_timestamp()
+    )
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # column name typo matches the actual DB column
+    under_selectror_master: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
 # =============================================================================
 # JUTE MR (MATERIAL RECEIPT) MODELS
 # =============================================================================

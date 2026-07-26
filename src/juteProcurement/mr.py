@@ -71,6 +71,7 @@ class MRUpdateRequest(BaseModel):
     party_id: Optional[int] = None
     party_branch_id: Optional[int] = None
     po_id: Optional[int] = None
+    mukam_id: Optional[int] = None
     remarks: Optional[str] = None
     src_com_id: Optional[int] = None
     line_items: List[MRLineItemUpdate] = []
@@ -555,6 +556,7 @@ async def update_jute_mr(
                 party_id = COALESCE(:party_id, party_id),
                 party_branch_id = :party_branch_id,
                 po_id = COALESCE(:po_id, po_id),
+                mukam_id = COALESCE(:mukam_id, mukam_id),
                 remarks = :remarks,
                 src_com_id = :src_com_id,
                 updated_by = :updated_by,
@@ -569,6 +571,7 @@ async def update_jute_mr(
             "party_id": body.party_id,
             "party_branch_id": body.party_branch_id,
             "po_id": body.po_id,
+            "mukam_id": body.mukam_id,
             "remarks": body.remarks,
             "src_com_id": body.src_com_id,
             "updated_by": user_id,

@@ -1257,6 +1257,84 @@ def check_trolly_exists(branch_id: int, dept_id: int, trolly_name: str, exclude_
 
 
 # =============================================================================
+# SELECTOR MASTER QUERIES
+# =============================================================================
+
+def get_selector_list(branch_id: int = None):
+    """Paginated selector list with branch + parent selector names."""
+    branch_filter = "AND sm.branch_id = :branch_id" if branch_id else ""
+    sql = f"""
+    SELECT
+      sm.tbl_selector_mst_id,
+      sm.selector_name,
+      sm.selector_shr_name,
+      sm.branch_id,
+      bm.branch_name,
+      sm.under_selectror_master,
+      pm.selector_name AS under_selector_name,
+      sm.active,
+      sm.updated_by,
+      sm.updated_date_time
+    FROM tbl_selector_mst sm
+    LEFT JOIN branch_mst bm ON sm.branch_id = bm.branch_id
+    LEFT JOIN tbl_selector_mst pm ON sm.under_selectror_master = pm.tbl_selector_mst_id
+    WHERE 1=1
+      {branch_filter}
+      AND (
+        :search IS NULL
+        OR sm.selector_name LIKE :search
+        OR sm.selector_shr_name LIKE :search
+      )
+    ORDER BY sm.tbl_selector_mst_id DESC
+    """
+    return text(sql)
+
+
+def get_selector_by_id():
+    sql = """
+    SELECT
+      sm.tbl_selector_mst_id,
+      sm.selector_name,
+      sm.selector_shr_name,
+      sm.branch_id,
+      bm.branch_name,
+      sm.under_selectror_master,
+      sm.active,
+      sm.updated_by,
+      sm.updated_date_time
+    FROM tbl_selector_mst sm
+    LEFT JOIN branch_mst bm ON sm.branch_id = bm.branch_id
+    WHERE sm.tbl_selector_mst_id = :selector_id
+    """
+    return text(sql)
+
+
+def get_selector_options():
+    """Active selectors for the 'Under Selector' dropdown."""
+    sql = """
+    SELECT tbl_selector_mst_id, selector_name
+    FROM tbl_selector_mst
+    WHERE active = 1
+    ORDER BY selector_name
+    """
+    return text(sql)
+
+
+def check_selector_exists(exclude_id: int = None):
+    """Duplicate check on (branch_id, selector_name)."""
+    sql = """
+    SELECT COUNT(*) AS count
+    FROM tbl_selector_mst
+    WHERE branch_id = :branch_id
+      AND selector_name = :selector_name
+      AND active = 1
+    """
+    if exclude_id:
+        sql += " AND tbl_selector_mst_id != :exclude_id"
+    return text(sql)
+
+
+# =============================================================================
 # ITEM BOM MASTER QUERIES
 # =============================================================================
 
