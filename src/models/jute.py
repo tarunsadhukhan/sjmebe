@@ -35,18 +35,15 @@ class Base(DeclarativeBase):
 # =============================================================================
 
 class JuteQualityMst(Base):
-    """DEPRECATED: Jute quality master table.
-    
-    Quality is now managed via item_mst hierarchy:
-    item_grp_mst (Jute parent) → item_grp_mst (subgroups) → item_mst (items = old qualities).
-    This model is kept for backward compatibility / data migration only.
-    """
+    """Jute quality master table (branch-scoped, linked to a jute item)."""
     __tablename__ = "jute_quality_mst"
 
     jute_qlty_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    co_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
-    jute_quality: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    jute_quality: Mapped[Optional[str]] = mapped_column(String(25), nullable=True)
+    shr_name: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_date_time: Mapped[datetime] = mapped_column(
         DateTime, nullable=True, server_default=func.current_timestamp()
@@ -156,6 +153,9 @@ class TrollyMst(Base):
     busket_weight: Mapped[Optional[Decimal]] = mapped_column(Double, nullable=True)
     branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     dept_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    trolly_posting_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # A=Assorting, S=Spinning, P=Spool Type, W=Winding
+    trolly_type: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_date_time: Mapped[datetime] = mapped_column(
         TIMESTAMP, nullable=False, server_default=func.current_timestamp()

@@ -1,6 +1,8 @@
-"""Trolly Master API endpoints.
+"""Jute Quality Entry API endpoints.
 
-CRUD endpoints for trolly_mst, modeled after spinningQuality.py.
+CRUD endpoints for jute_quality_mst (new branch-scoped schema), modeled after
+selector.py. Replaces the deprecated juteQuality.py which targeted the old
+co_id-based schema.
 """
 
 import os
@@ -10,13 +12,13 @@ from sqlalchemy.orm import Session
 from src.config.db import get_tenant_db
 from src.authorization.utils import get_current_user_with_refresh
 from src.common.utils import now_ist
-from src.models.jute import TrollyMst
+from src.models.jute import JuteQualityMst
 from src.masters.query import (
     get_branch_list,
-    get_dept_list,
-    get_trolly_list,
-    get_trolly_by_id,
-    check_trolly_exists,
+    get_jute_quality_entry_list,
+    get_jute_quality_entry_by_id,
+    get_jute_item_options,
+    check_jute_quality_entry_exists,
 )
 
 router = APIRouter()
@@ -35,14 +37,14 @@ def optional_auth(
     return get_current_user_with_refresh(request, response, access_token)
 
 
-@router.get("/trolly_create_setup")
-async def trolly_create_setup(
+@router.get("/jute_quality_create_setup")
+async def jute_quality_create_setup(
     request: Request,
     response: Response,
     db: Session = Depends(get_tenant_db),
     token_data: dict = Depends(get_current_user_with_refresh),
 ):
-    """Return dropdown options (branches + departments) for create form."""
+    """Return dropdown options (branches + jute items) for create form."""
     try:
         co_id = request.query_params.get("co_id")
         if not co_id:
@@ -51,23 +53,23 @@ async def trolly_create_setup(
         branches = db.execute(
             get_branch_list(co_id=int(co_id)), {"co_id": int(co_id)}
         ).fetchall()
-        depts = db.execute(get_dept_list()).fetchall()
+        items = db.execute(get_jute_item_options(), {"co_id": int(co_id)}).fetchall()
 
         return {
             "data": {
                 "branches": [dict(r._mapping) for r in branches],
-                "departments": [dict(r._mapping) for r in depts],
+                "items": [dict(r._mapping) for r in items],
             }
         }
     except HTTPException:
         raise
     except Exception as e:
-        print(f"trolly_create_setup error: {e}", flush=True)
+        print(f"jute_quality_create_setup error: {e}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/trolly_table")
-async def trolly_table(
+@router.get("/jute_quality_table")
+async def jute_quality_table(
     request: Request,
     response: Response,
     db: Session = Depends(get_tenant_db),
@@ -76,7 +78,7 @@ async def trolly_table(
     limit: int = 10,
     search: str = None,
 ):
-    """Paginated trolly list with optional search and branch filter."""
+    """Paginated jute quality list with optional search and branch filter."""
     try:
         co_id = request.query_params.get("co_id")
         if not co_id:
@@ -90,7 +92,7 @@ async def trolly_table(
         if branch_id_int:
             params["branch_id"] = branch_id_int
 
-        rows = db.execute(get_trolly_list(branch_id_int), params).fetchall()
+        rows = db.execute(get_jute_quality_entry_list(branch_id_int), params).fetchall()
         data = [dict(r._mapping) for r in rows]
 
         total = len(data)
@@ -105,58 +107,47 @@ async def trolly_table(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"trolly_table error: {e}", flush=True)
+        print(f"jute_quality_table error: {e}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/trolly_create")
-async def trolly_create(
+@router.post("/jute_quality_create")
+async def jute_quality_create(
     payload: dict,
     response: Response,
     db: Session = Depends(get_tenant_db),
     token_data: dict = Depends(optional_auth),
 ):
-    """Create a new trolly record."""
+    """Create a new jute quality record."""
     try:
         user_id = (token_data or {}).get("user_id") or payload.get("updated_by")
 
-        trolly_name = payload.get("trolly_name")
+        jute_quality = payload.get("jute_quality")
+        shr_name = payload.get("shr_name")
         branch_id = payload.get("branch_id")
-        dept_id = payload.get("dept_id")
-        trolly_weight = payload.get("trolly_weight")
-        busket_weight = payload.get("busket_weight")
-        trolly_posting_code = payload.get("trolly_posting_code")
-        trolly_type = payload.get("trolly_type")
+        item_id = payload.get("item_id")
 
-        if not trolly_name:
-            raise HTTPException(status_code=400, detail="Trolly name is required")
+        if not jute_quality:
+            raise HTTPException(status_code=400, detail="Jute Quality is required")
         if not branch_id:
             raise HTTPException(status_code=400, detail="Branch is required")
-        if not dept_id:
-            raise HTTPException(status_code=400, detail="Department is required")
 
         dup_row = db.execute(
-            check_trolly_exists(int(branch_id), int(dept_id), trolly_name),
-            {
-                "branch_id": int(branch_id),
-                "dept_id": int(dept_id),
-                "trolly_name": trolly_name,
-            },
+            check_jute_quality_entry_exists(),
+            {"branch_id": int(branch_id), "jute_quality": jute_quality},
         ).fetchone()
         if dup_row and dup_row._mapping.get("count", 0) > 0:
             raise HTTPException(
                 status_code=409,
-                detail="Trolly with same name already exists for this Branch and Department",
+                detail="Jute Quality with same name already exists for this Branch",
             )
 
-        record = TrollyMst(
-            trolly_name=trolly_name,
-            trolly_weight=float(trolly_weight) if trolly_weight not in (None, "") else None,
-            busket_weight=float(busket_weight) if busket_weight not in (None, "") else None,
+        record = JuteQualityMst(
+            jute_quality=jute_quality,
+            shr_name=shr_name or None,
             branch_id=int(branch_id),
-            dept_id=int(dept_id),
-            trolly_posting_code=int(trolly_posting_code) if trolly_posting_code not in (None, "") else None,
-            trolly_type=trolly_type or None,
+            item_id=int(item_id) if item_id not in (None, "") else None,
+            active=int(payload.get("active", 1)),
             updated_by=int(user_id) if user_id and str(user_id).isdigit() else None,
             updated_date_time=now_ist(),
         )
@@ -165,19 +156,19 @@ async def trolly_create(
         db.refresh(record)
         response.status_code = 201
         return {
-            "message": "Trolly created successfully",
-            "trolly_id": record.trolly_id,
+            "message": "Jute Quality created successfully",
+            "jute_qlty_id": record.jute_qlty_id,
         }
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        print(f"trolly_create error: {e}", flush=True)
+        print(f"jute_quality_create error: {e}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/trolly_edit_setup")
-async def trolly_edit_setup(
+@router.get("/jute_quality_edit_setup")
+async def jute_quality_edit_setup(
     request: Request,
     response: Response,
     db: Session = Depends(get_tenant_db),
@@ -186,99 +177,94 @@ async def trolly_edit_setup(
     """Return record details + dropdown options for edit form."""
     try:
         co_id = request.query_params.get("co_id")
-        trolly_id = request.query_params.get("trolly_id")
+        jute_qlty_id = request.query_params.get("jute_qlty_id")
         if not co_id:
             raise HTTPException(status_code=400, detail="Company ID (co_id) is required")
-        if not trolly_id:
-            raise HTTPException(status_code=400, detail="trolly_id is required")
+        if not jute_qlty_id:
+            raise HTTPException(status_code=400, detail="jute_qlty_id is required")
 
         row = db.execute(
-            get_trolly_by_id(), {"trolly_id": int(trolly_id)}
+            get_jute_quality_entry_by_id(), {"jute_qlty_id": int(jute_qlty_id)}
         ).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="Trolly not found")
+            raise HTTPException(status_code=404, detail="Jute Quality not found")
 
         branches = db.execute(
             get_branch_list(co_id=int(co_id)), {"co_id": int(co_id)}
         ).fetchall()
-        depts = db.execute(get_dept_list()).fetchall()
+        items = db.execute(get_jute_item_options(), {"co_id": int(co_id)}).fetchall()
 
         return {
             "data": {
-                "trolly_details": dict(row._mapping),
+                "jute_quality_details": dict(row._mapping),
                 "branches": [dict(r._mapping) for r in branches],
-                "departments": [dict(r._mapping) for r in depts],
+                "items": [dict(r._mapping) for r in items],
             }
         }
     except HTTPException:
         raise
     except Exception as e:
-        print(f"trolly_edit_setup error: {e}", flush=True)
+        print(f"jute_quality_edit_setup error: {e}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.api_route("/trolly_edit", methods=["POST", "PUT"])
-async def trolly_edit(
+@router.api_route("/jute_quality_edit", methods=["POST", "PUT"])
+async def jute_quality_edit(
     payload: dict,
     response: Response,
     db: Session = Depends(get_tenant_db),
     token_data: dict = Depends(optional_auth),
 ):
-    """Edit an existing trolly record."""
+    """Edit an existing jute quality record."""
     try:
         user_id = (token_data or {}).get("user_id") or payload.get("updated_by")
 
-        trolly_id = payload.get("trolly_id")
-        if not trolly_id:
-            raise HTTPException(status_code=400, detail="trolly_id is required")
+        jute_qlty_id = payload.get("jute_qlty_id")
+        if not jute_qlty_id:
+            raise HTTPException(status_code=400, detail="jute_qlty_id is required")
 
         existing = (
-            db.query(TrollyMst).filter(TrollyMst.trolly_id == int(trolly_id)).first()
+            db.query(JuteQualityMst)
+            .filter(JuteQualityMst.jute_qlty_id == int(jute_qlty_id))
+            .first()
         )
         if not existing:
-            raise HTTPException(status_code=404, detail="Trolly not found")
+            raise HTTPException(status_code=404, detail="Jute Quality not found")
 
-        trolly_name = payload.get("trolly_name")
+        jute_quality = payload.get("jute_quality")
+        shr_name = payload.get("shr_name")
         branch_id = payload.get("branch_id")
-        dept_id = payload.get("dept_id")
-        trolly_weight = payload.get("trolly_weight")
-        busket_weight = payload.get("busket_weight")
+        item_id = payload.get("item_id")
 
         target_branch = int(branch_id) if branch_id not in (None, "") else existing.branch_id
-        target_dept = int(dept_id) if dept_id not in (None, "") else existing.dept_id
-        target_name = trolly_name if trolly_name is not None else existing.trolly_name
+        target_name = jute_quality if jute_quality is not None else existing.jute_quality
 
-        if target_branch and target_dept and target_name:
+        if target_branch and target_name:
             dup_row = db.execute(
-                check_trolly_exists(target_branch, target_dept, target_name, int(trolly_id)),
+                check_jute_quality_entry_exists(int(jute_qlty_id)),
                 {
                     "branch_id": target_branch,
-                    "dept_id": target_dept,
-                    "trolly_name": target_name,
-                    "exclude_id": int(trolly_id),
+                    "jute_quality": target_name,
+                    "exclude_id": int(jute_qlty_id),
                 },
             ).fetchone()
             if dup_row and dup_row._mapping.get("count", 0) > 0:
                 raise HTTPException(
                     status_code=409,
-                    detail="Trolly with same name already exists for this Branch and Department",
+                    detail="Jute Quality with same name already exists for this Branch",
                 )
 
-        if trolly_name is not None:
-            existing.trolly_name = trolly_name
+        if jute_quality is not None:
+            existing.jute_quality = jute_quality
+        if shr_name is not None:
+            existing.shr_name = shr_name or None
         if branch_id not in (None, ""):
             existing.branch_id = int(branch_id)
-        if dept_id not in (None, ""):
-            existing.dept_id = int(dept_id)
-        if trolly_weight not in (None, ""):
-            existing.trolly_weight = float(trolly_weight)
-        if busket_weight not in (None, ""):
-            existing.busket_weight = float(busket_weight)
-        if "trolly_posting_code" in payload:
-            tpc = payload["trolly_posting_code"]
-            existing.trolly_posting_code = int(tpc) if tpc not in (None, "") else None
-        if "trolly_type" in payload:
-            existing.trolly_type = payload["trolly_type"] or None
+        # item_id: "" clears the item, absent key leaves it unchanged
+        if "item_id" in payload:
+            existing.item_id = int(item_id) if item_id not in (None, "") else None
+        if payload.get("active") not in (None, ""):
+            existing.active = int(payload["active"])
         if user_id and str(user_id).isdigit():
             existing.updated_by = int(user_id)
         existing.updated_date_time = now_ist()
@@ -286,12 +272,12 @@ async def trolly_edit(
         db.commit()
         db.refresh(existing)
         return {
-            "message": "Trolly updated successfully",
-            "trolly_id": existing.trolly_id,
+            "message": "Jute Quality updated successfully",
+            "jute_qlty_id": existing.jute_qlty_id,
         }
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        print(f"trolly_edit error: {e}", flush=True)
+        print(f"jute_quality_edit error: {e}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))

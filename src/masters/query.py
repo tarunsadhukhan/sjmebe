@@ -1204,6 +1204,8 @@ def get_trolly_list(branch_id: int = None):
       bm.branch_name,
       tm.dept_id,
       dm.dept_desc AS dept_name,
+      tm.trolly_posting_code,
+      tm.trolly_type,
       tm.updated_by,
       tm.updated_date_time
     FROM trolly_mst tm
@@ -1232,6 +1234,8 @@ def get_trolly_by_id():
       bm.branch_name,
       tm.dept_id,
       dm.dept_desc AS dept_name,
+      tm.trolly_posting_code,
+      tm.trolly_type,
       tm.updated_by,
       tm.updated_date_time
     FROM trolly_mst tm
@@ -1331,6 +1335,95 @@ def check_selector_exists(exclude_id: int = None):
     """
     if exclude_id:
         sql += " AND tbl_selector_mst_id != :exclude_id"
+    return text(sql)
+
+
+# =============================================================================
+# JUTE QUALITY ENTRY QUERIES
+# =============================================================================
+
+def get_jute_quality_entry_list(branch_id: int = None):
+    """Paginated jute quality list with branch + item names."""
+    branch_filter = "AND jq.branch_id = :branch_id" if branch_id else ""
+    sql = f"""
+    SELECT
+      jq.jute_qlty_id,
+      jq.jute_quality,
+      jq.shr_name,
+      jq.branch_id,
+      bm.branch_name,
+      jq.item_id,
+      im.item_code,
+      im.item_name,
+      jq.active,
+      jq.updated_by,
+      jq.updated_date_time
+    FROM jute_quality_mst jq
+    LEFT JOIN branch_mst bm ON jq.branch_id = bm.branch_id
+    LEFT JOIN item_mst im ON jq.item_id = im.item_id
+    WHERE 1=1
+      {branch_filter}
+      AND (
+        :search IS NULL
+        OR jq.jute_quality LIKE :search
+        OR jq.shr_name LIKE :search
+        OR im.item_name LIKE :search
+      )
+    ORDER BY jq.jute_qlty_id DESC
+    """
+    return text(sql)
+
+
+def get_jute_quality_entry_by_id():
+    sql = """
+    SELECT
+      jq.jute_qlty_id,
+      jq.jute_quality,
+      jq.shr_name,
+      jq.branch_id,
+      bm.branch_name,
+      jq.item_id,
+      im.item_code,
+      im.item_name,
+      jq.active,
+      jq.updated_by,
+      jq.updated_date_time
+    FROM jute_quality_mst jq
+    LEFT JOIN branch_mst bm ON jq.branch_id = bm.branch_id
+    LEFT JOIN item_mst im ON jq.item_id = im.item_id
+    WHERE jq.jute_qlty_id = :jute_qlty_id
+    """
+    return text(sql)
+
+
+def get_jute_item_options():
+    """Active jute items (item_grp_mst.item_type_id = 2) for the item dropdown."""
+    sql = """
+    SELECT
+      im.item_id,
+      im.item_code,
+      im.item_name
+    FROM item_mst im
+    INNER JOIN item_grp_mst ig ON im.item_grp_id = ig.item_grp_id
+    WHERE ig.co_id = :co_id
+      AND ig.item_type_id = 2
+      AND im.active = 1
+    ORDER BY im.item_name
+    """
+    return text(sql)
+
+
+def check_jute_quality_entry_exists(exclude_id: int = None):
+    """Duplicate check on (branch_id, jute_quality)."""
+    sql = """
+    SELECT COUNT(*) AS count
+    FROM jute_quality_mst
+    WHERE branch_id = :branch_id
+      AND jute_quality = :jute_quality
+      AND active = 1
+    """
+    if exclude_id:
+        sql += " AND jute_qlty_id != :exclude_id"
     return text(sql)
 
 
