@@ -278,6 +278,9 @@ class SpinningEmpBrkRow(BaseModel):
     rpm: Optional[float] = 0.0
     eff_100: Optional[float] = 0.0
     actual_eff: Optional[float] = 0.0
+    run_eff: Optional[float] = None
+    emp_eff_15d: Optional[float] = None
+    frame_eff_15d: Optional[float] = None
 
 
 class SpinningEmpBrkResponse(BaseModel):
