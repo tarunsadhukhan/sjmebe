@@ -22,6 +22,7 @@ from src.juteProcurement.query import (
     get_mukam_list_query,
     get_all_suppliers_query,
     get_parties_by_supplier_query,
+    get_all_parties_with_supplier_query,
     get_jute_items_query,
     get_jute_qualities_by_item_query,
     get_open_jute_pos_query,
@@ -239,6 +240,10 @@ async def jute_gate_entry_create_setup(
         suppliers_result = db.execute(get_all_suppliers_query(), {"co_id": co_id}).fetchall()
         suppliers = [dict(r._mapping) for r in suppliers_result]
 
+        # Get all mapped parties with their supplier (party-first selection flow)
+        parties_result = db.execute(get_all_parties_with_supplier_query(), {"co_id": co_id}).fetchall()
+        parties = [dict(r._mapping) for r in parties_result]
+
         # Get jute groups (subgroups with parent item_type_id = 2)
         jute_groups_result = db.execute(get_jute_items_query(), {"co_id": co_id}).fetchall()
         jute_groups = [dict(r._mapping) for r in jute_groups_result]
@@ -266,6 +271,7 @@ async def jute_gate_entry_create_setup(
             "branches": branches,
             "mukams": mukams,
             "suppliers": suppliers,
+            "parties": parties,
             "jute_groups": jute_groups,
             "open_pos": open_pos,
             "uom_options": uom_options,
@@ -406,7 +412,7 @@ class JuteGateEntryCreate(BaseModel):
     challan_weight: float
     vehicle_no: str
     driver_name: str
-    transporter: str
+    transporter: Optional[str] = None  # Replaced by Party on the form; kept for API compat
     po_id: Optional[int] = None
     jute_uom: Optional[str] = None  # LOOSE or BALE
     mukam_id: Optional[int] = None
@@ -672,32 +678,22 @@ async def jute_gate_entry_update(
         if not existing:
             raise HTTPException(status_code=404, detail="Jute Gate Entry not found")
         
-        # QC checkpoint: tare_weight, variable_shortage, out_time require QC completion
+        # QC checkpoint: variable_shortage requires QC completion
         qc_complete = existing.qc_check == 1 if existing.qc_check is not None else False
-        
+
         if not qc_complete:
-            if payload.tare_weight is not None and payload.tare_weight > 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Tare Weight cannot be entered until Quality Check (QC) is completed"
-                )
             if payload.variable_shortage is not None and payload.variable_shortage > 0:
                 raise HTTPException(
                     status_code=400,
                     detail="Variable Shortage cannot be entered until Quality Check (QC) is completed"
                 )
-            if payload.out_time is not None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Out Time cannot be recorded until Quality Check (QC) is completed"
-                )
-        
-        # Handle OUT action
+
+        # Handle OUT action - requires a tare weight to have been entered
         if payload.action and payload.action.upper() == "OUT":
-            if not qc_complete:
+            if not (payload.tare_weight and payload.tare_weight > 0):
                 raise HTTPException(
                     status_code=400,
-                    detail="Vehicle cannot be marked as OUT until Quality Check (QC) is completed"
+                    detail="Tare Weight must be entered before the vehicle can be marked as OUT"
                 )
             if not payload.out_time:
                 raise HTTPException(status_code=400, detail="out_time is required for OUT action")

@@ -22,6 +22,7 @@ from src.juteProcurement.query import (
     get_branches_query,
     get_company_letterhead_query,
     get_all_suppliers_query,
+    get_all_parties_with_supplier_query,
     get_brokers_query,
     get_jute_po_with_approval_info,
     update_jute_po_status,
@@ -306,6 +307,10 @@ async def jute_po_create_setup(
         suppliers_result = db.execute(get_all_suppliers_query(), {"co_id": co_id}).fetchall()
         suppliers = [dict(r._mapping) for r in suppliers_result]
 
+        # Get all mapped parties with their supplier (party-first selection flow)
+        parties_result = db.execute(get_all_parties_with_supplier_query(), {"co_id": co_id}).fetchall()
+        parties = [dict(r._mapping) for r in parties_result]
+
         # Get brokers (parties from party_mst) for the Broker Name dropdown
         brokers_result = db.execute(get_brokers_query(), {"co_id": co_id}).fetchall()
         brokers = [dict(r._mapping) for r in brokers_result]
@@ -344,6 +349,7 @@ async def jute_po_create_setup(
             "vehicle_types": vehicle_types,
             "jute_groups": jute_groups,
             "suppliers": suppliers,
+            "parties": parties,
             "brokers": brokers,
             "company": company,
             "channel_options": channel_options,

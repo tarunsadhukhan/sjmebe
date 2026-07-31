@@ -387,6 +387,27 @@ def get_parties_by_supplier_query():
     return text(sql)
 
 
+def get_all_parties_with_supplier_query():
+    """
+    Query to get all mapped parties for the company with their jute supplier.
+    Used when the Party is selected first and the Supplier is derived from it.
+    """
+    sql = """
+        SELECT
+            pm.party_id,
+            pm.supp_name AS party_name,
+            MAX(jspm.jute_supplier_id) AS jute_supplier_id
+        FROM party_mst pm
+        JOIN jute_supp_party_map jspm
+            ON jspm.party_id = pm.party_id
+        WHERE jspm.co_id = :co_id
+          AND (pm.active = 1 OR pm.active IS NULL)
+        GROUP BY pm.party_id, pm.supp_name
+        ORDER BY pm.supp_name
+    """
+    return text(sql)
+
+
 def get_brokers_query():
     """
     Query to get brokers for the Jute PO header (Broker Name dropdown).
