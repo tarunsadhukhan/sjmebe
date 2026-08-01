@@ -167,7 +167,7 @@ class FrameDetailsMst(Base):
     __tablename__ = "frame_details_mst"
 
     frame_details_mst_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, unique=True, index=True)
     speed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     frame_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     bobbin_weight: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
