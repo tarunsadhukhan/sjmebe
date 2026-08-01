@@ -162,6 +162,22 @@ class TrollyMst(Base):
     )
 
 
+class FrameDetailsMst(Base):
+    """Frame details master - spinning frame config (speed, spindles, bobbin weight) per machine."""
+    __tablename__ = "frame_details_mst"
+
+    frame_details_mst_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    speed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    frame_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    bobbin_weight: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    no_of_spindle: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[datetime] = mapped_column(
+        TIMESTAMP, nullable=False, server_default=func.current_timestamp()
+    )
+
+
 class SelectorMst(Base):
     """Selector master table - self-referencing hierarchy via under_selectror_master."""
     __tablename__ = "tbl_selector_mst"

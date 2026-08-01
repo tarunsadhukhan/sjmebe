@@ -53,6 +53,7 @@ from src.masters.machineSpgDetails import router as machine_spg_details_router
 from src.masters.spinningQuality import router as spinning_quality_router
 from src.masters.windingQuality import router as winding_quality_router
 from src.masters.trolly import router as trolly_router
+from src.masters.frameDetails import router as frame_details_router
 from src.masters.selector import router as selector_router
 from src.masters.juteQualityEntry import router as jute_quality_entry_router
 from src.utilities.backup import router as db_backup_router
@@ -195,6 +196,7 @@ app.include_router(machine_spg_details_router, prefix="/api/machineSpgDetailsMas
 app.include_router(spinning_quality_router, prefix="/api/spinningQualityMaster", tags=["masters-spinning-quality"])
 app.include_router(winding_quality_router, prefix="/api/windingQualityMaster", tags=["masters-winding-quality"])
 app.include_router(trolly_router, prefix="/api/trollyMaster", tags=["masters-trolly"])
+app.include_router(frame_details_router, prefix="/api/frameMaster", tags=["masters-frame"])
 app.include_router(selector_router, prefix="/api/selectorMaster", tags=["masters-selector"])
 app.include_router(jute_quality_entry_router, prefix="/api/juteQualityEntry", tags=["masters-jute-quality-entry"])
 app.include_router(db_backup_router, prefix="/api/utilities", tags=["utilities"])

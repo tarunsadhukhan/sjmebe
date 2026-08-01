@@ -1533,3 +1533,75 @@ def get_bom_uom_list():
     """
     return text(sql)
 
+
+
+# =============================================================================
+# FRAME DETAILS MASTER QUERIES
+# =============================================================================
+
+def get_frame_machine_list():
+    """Frame No dropdown: active machines of the spinning-frame type."""
+    sql = """
+    SELECT m.machine_id, m.machine_name, m.mech_code
+    FROM machine_mst m
+    WHERE m.active = 1
+      AND m.machine_type_id = :machine_type_id
+    ORDER BY m.machine_name
+    """
+    return text(sql)
+
+
+def get_frame_details_list():
+    """Frame details list with machine name, optional search."""
+    sql = """
+    SELECT
+      fd.frame_details_mst_id,
+      fd.mc_id,
+      mm.machine_name,
+      fd.speed,
+      fd.frame_type,
+      fd.bobbin_weight,
+      fd.no_of_spindle,
+      fd.updated_by,
+      fd.updated_date_time
+    FROM frame_details_mst fd
+    LEFT JOIN machine_mst mm ON mm.machine_id = fd.mc_id
+    WHERE (
+        :search IS NULL
+        OR mm.machine_name LIKE :search
+        OR fd.frame_type LIKE :search
+      )
+    ORDER BY fd.frame_details_mst_id DESC
+    """
+    return text(sql)
+
+
+def get_frame_details_by_id():
+    sql = """
+    SELECT
+      fd.frame_details_mst_id,
+      fd.mc_id,
+      mm.machine_name,
+      fd.speed,
+      fd.frame_type,
+      fd.bobbin_weight,
+      fd.no_of_spindle,
+      fd.updated_by,
+      fd.updated_date_time
+    FROM frame_details_mst fd
+    LEFT JOIN machine_mst mm ON mm.machine_id = fd.mc_id
+    WHERE fd.frame_details_mst_id = :frame_details_mst_id
+    """
+    return text(sql)
+
+
+def check_frame_details_exists(exclude_id: int = None):
+    """Duplicate check: one frame_details row per machine (mc_id)."""
+    sql = """
+    SELECT COUNT(*) AS count
+    FROM frame_details_mst
+    WHERE mc_id = :mc_id
+    """
+    if exclude_id:
+        sql += " AND frame_details_mst_id != :exclude_id"
+    return text(sql)
