@@ -1605,3 +1605,73 @@ def check_frame_details_exists(exclude_id: int = None):
     if exclude_id:
         sql += " AND frame_details_mst_id != :exclude_id"
     return text(sql)
+
+
+# =============================================================================
+# DRAWING MASTER QUERIES
+# =============================================================================
+# Machine dropdown reuses get_frame_machine_list (parameterized :machine_type_id).
+
+def get_drawing_mst_list():
+    """Drawing master list with machine + branch names, optional search."""
+    sql = """
+    SELECT
+      dm.drg_mst_id,
+      dm.mc_id,
+      mm.machine_name,
+      dm.short_name,
+      dm.shed_type,
+      dm.drg_type,
+      dm.const_meter,
+      dm.meter_type,
+      dm.branch_id,
+      bm.branch_name,
+      dm.updated_by,
+      dm.updated_date_time
+    FROM tbl_drawing_mst dm
+    LEFT JOIN machine_mst mm ON mm.machine_id = dm.mc_id
+    LEFT JOIN branch_mst bm ON bm.branch_id = dm.branch_id
+    WHERE (
+        :search IS NULL
+        OR mm.machine_name LIKE :search
+        OR dm.short_name LIKE :search
+        OR dm.shed_type LIKE :search
+      )
+    ORDER BY dm.drg_mst_id DESC
+    """
+    return text(sql)
+
+
+def get_drawing_mst_by_id():
+    sql = """
+    SELECT
+      dm.drg_mst_id,
+      dm.mc_id,
+      mm.machine_name,
+      dm.short_name,
+      dm.shed_type,
+      dm.drg_type,
+      dm.const_meter,
+      dm.meter_type,
+      dm.branch_id,
+      bm.branch_name,
+      dm.updated_by,
+      dm.updated_date_time
+    FROM tbl_drawing_mst dm
+    LEFT JOIN machine_mst mm ON mm.machine_id = dm.mc_id
+    LEFT JOIN branch_mst bm ON bm.branch_id = dm.branch_id
+    WHERE dm.drg_mst_id = :drg_mst_id
+    """
+    return text(sql)
+
+
+def check_drawing_mst_exists(exclude_id: int = None):
+    """Duplicate check: one drawing master row per machine (mc_id)."""
+    sql = """
+    SELECT COUNT(*) AS count
+    FROM tbl_drawing_mst
+    WHERE mc_id = :mc_id
+    """
+    if exclude_id:
+        sql += " AND drg_mst_id != :exclude_id"
+    return text(sql)

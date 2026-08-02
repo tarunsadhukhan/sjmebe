@@ -178,6 +178,25 @@ class FrameDetailsMst(Base):
     )
 
 
+class TblDrawingMst(Base):
+    """Drawing machine master - shed/type/const-meter config per drawing frame."""
+    __tablename__ = "tbl_drawing_mst"
+
+    drg_mst_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mc_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    const_meter: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    drg_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    short_name: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    shed_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    branch_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 0 = No Meter, 1 = Hours, 2 = Seconds
+    meter_type: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_date_time: Mapped[datetime] = mapped_column(
+        TIMESTAMP, nullable=False, server_default=func.current_timestamp()
+    )
+
+
 class SelectorMst(Base):
     """Selector master table - self-referencing hierarchy via under_selectror_master."""
     __tablename__ = "tbl_selector_mst"
