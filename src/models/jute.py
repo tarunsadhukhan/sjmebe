@@ -18,6 +18,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     TIMESTAMP,
     func,
@@ -1654,8 +1655,9 @@ class JuteSqcBagWeight(Base):
     """R-08-23 Bag Weight — finished-bag weight control.
 
     Flat single-table morrah pattern (NO detail table). One row per (entry_date,
-    bag type) block carries N reading rows (up to 24, variable >=1) as a JSON string
-    array of objects {mr, obs} (readings String(2000) + json.dumps / json.loads).
+    bag type) sheet carries N reading rows (up to 24, variable >=1) as a JSON string
+    array of objects {mr, obs, + optional length/width/ends/picks/stitch/remarks}
+    (readings TEXT + json.dumps / json.loads).
     std_bag_weight + std_mr_pct are entered on the form (std_mr_pct prefills 20 for
     jute bags, editable) and snapshotted here. Per-row corr = obs * (100 + std_mr_pct)
     / (100 + mr). Block stats — avg_mr / avg_obs / row-wise avg_corr / sample stdev of
@@ -1672,9 +1674,12 @@ class JuteSqcBagWeight(Base):
     entry_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     item_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     bag_type_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    std_length_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    std_width_cm: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
     std_bag_weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
     std_mr_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
-    readings: Mapped[str] = mapped_column(String(2000), nullable=False)
+    above_wt_gm: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    readings: Mapped[str] = mapped_column(Text, nullable=False)
     calc_avg_mr: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 3), nullable=True)
     calc_avg_obs_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
     calc_avg_corr_wt: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
@@ -1682,6 +1687,7 @@ class JuteSqcBagWeight(Base):
     calc_obs_cv_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
     calc_obs_hy_lt_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
     calc_corr_hy_lt_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    calc_above_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
     active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_date_time: Mapped[Optional[datetime]] = mapped_column(

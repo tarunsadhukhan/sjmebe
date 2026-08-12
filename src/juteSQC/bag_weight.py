@@ -1,10 +1,13 @@
 """
 R-08-23 Bag Weight QC API endpoints.
 
-Finished-bag weight control. ONE save = ONE (entry_date, bag type) block: a flat header
-(entry_date, bag type, std_bag_weight, std_mr_pct) plus N reading rows (up to 24, variable
->=1), each row = {mr (MR%), obs (observed bag weight gm)}. Readings stored as a JSON-string
-array of objects (morrah flat pattern, single table — NO detail table).
+Finished-bag weight control. ONE save = ONE (entry_date, bag type) sheet: a flat header
+(entry_date, bag type, nominal size std_length_cm x std_width_cm, std_bag_weight,
+std_mr_pct, above_wt_gm) plus N reading rows (up to 24, variable >=1), each row =
+{mr (MR%), obs (observed bag weight gm)} plus the optional dimensional fields the paper
+sheet records — length, width, ends, picks, stitch, remarks (stored + echoed only, they
+feed NO calculation). Readings stored as a JSON-string array of objects (morrah flat
+pattern, single table — NO detail table).
 
 PER-ROW (computed at save, re-derived on read): corr = obs * (100 + std_mr_pct) / (100 + mr).
 BLOCK stats (server-authoritative, stored at save):
@@ -12,7 +15,9 @@ BLOCK stats (server-authoritative, stored at save):
   obs_stdev = SAMPLE stdev(obs) (n-1, statistics.stdev, null if <2 rows);
   obs_cv_pct = obs_stdev / avg_obs * 100;
   obs_hy_lt_pct = (avg_obs - std_bag_weight) / std_bag_weight * 100;
-  corr_hy_lt_pct = (avg_corr - std_bag_weight) / std_bag_weight * 100.
+  corr_hy_lt_pct = (avg_corr - std_bag_weight) / std_bag_weight * 100;
+  above_pct = share of corrected weights (rounded to whole gm, as displayed) STRICTLY above
+  above_wt_gm — the sheet's "Above 585 gm = 65%" line; None when no threshold is entered.
 HY/LT sign: positive = Heavy, negative = Light. DISPLAY-ONLY (no hard pass/fail band).
 
 std_bag_weight + std_mr_pct are entered on the form (std_mr_pct prefills 20 for jute bags,
@@ -51,8 +56,18 @@ router = APIRouter()
 
 
 class BagWeightReading(BaseModel):
+    """One inspected bag. mr/obs drive every stat; the dimensional fields (length, width,
+    ends, picks, stitch) and remarks are recorded as per the paper R-08-23 sheet and are
+    stored/echoed as-is — they are NOT used in any calculation."""
+
     mr: float
     obs: float
+    length: Optional[float] = None
+    width: Optional[float] = None
+    ends: Optional[float] = None
+    picks: Optional[float] = None
+    stitch: Optional[float] = None
+    remarks: Optional[str] = None
 
 
 class BagWeightCreateRequest(BaseModel):
@@ -61,8 +76,11 @@ class BagWeightCreateRequest(BaseModel):
     entry_date: str
     item_id: Optional[int] = None
     bag_type_label: Optional[str] = None
+    std_length_cm: Optional[float] = None
+    std_width_cm: Optional[float] = None
     std_bag_weight: float
     std_mr_pct: float
+    above_wt_gm: Optional[float] = None
     readings: List[BagWeightReading]
 
 
@@ -77,10 +95,17 @@ def row_corr(obs: float, mr: float, std_mr_pct: float) -> float:
     return obs * (100.0 + std_mr_pct) / (100.0 + mr)
 
 
-def compute_bag_weight_stats(readings: List[dict], std_bag_weight: float, std_mr_pct: float) -> dict:
+def compute_bag_weight_stats(
+    readings: List[dict],
+    std_bag_weight: float,
+    std_mr_pct: float,
+    above_wt_gm: Optional[float] = None,
+) -> dict:
     """Block stats over the rows (authoritative). avg_corr is the ROW-WISE mean of the
     per-row corrected weights. obs_stdev = SAMPLE stdev (n-1), None when <2 rows; cv guards
-    on avg_obs > 0. HY/LT percents are display-only (positive = Heavy, negative = Light)."""
+    on avg_obs > 0. HY/LT percents are display-only (positive = Heavy, negative = Light).
+    above_pct = share of CORRECTED weights STRICTLY above above_wt_gm (paper sheet's
+    "Above 585 gm = 65%" line); None when no threshold is given."""
     mrs = [r["mr"] for r in readings]
     obss = [r["obs"] for r in readings]
     corrs = [row_corr(r["obs"], r["mr"], std_mr_pct) for r in readings]
@@ -107,6 +132,14 @@ def compute_bag_weight_stats(readings: List[dict], std_bag_weight: float, std_mr
         else None
     )
 
+    # Compared on the corrected weight as DISPLAYED (whole gm) so the count always agrees
+    # with the Corrd. Wt. column the inspector reads off the sheet.
+    above_pct = (
+        round(sum(1 for c in corrs if round(c) > above_wt_gm) / len(corrs) * 100, 2)
+        if above_wt_gm is not None and above_wt_gm > 0 and corrs
+        else None
+    )
+
     return {
         "calc_avg_mr": round(avg_mr, 3),
         "calc_avg_obs_wt": round(avg_obs, 2),
@@ -115,6 +148,7 @@ def compute_bag_weight_stats(readings: List[dict], std_bag_weight: float, std_mr
         "calc_obs_cv_pct": obs_cv_pct,
         "calc_obs_hy_lt_pct": obs_hy_lt_pct,
         "calc_corr_hy_lt_pct": corr_hy_lt_pct,
+        "calc_above_pct": above_pct,
     }
 
 
@@ -188,8 +222,14 @@ async def create_bag_weight(
         if body.std_mr_pct <= 0:
             raise HTTPException(status_code=400, detail="std_mr_pct must be positive")
 
-        readings = [{"mr": r.mr, "obs": r.obs} for r in body.readings]
-        stats = compute_bag_weight_stats(readings, body.std_bag_weight, body.std_mr_pct)
+        # Drop None dimensional fields so the stored JSON stays compact.
+        readings = [
+            {k: v for k, v in r.model_dump().items() if v is not None and v != ""}
+            for r in body.readings
+        ]
+        stats = compute_bag_weight_stats(
+            readings, body.std_bag_weight, body.std_mr_pct, body.above_wt_gm
+        )
 
         record = JuteSqcBagWeight(
             co_id=body.co_id,
@@ -197,8 +237,11 @@ async def create_bag_weight(
             entry_date=body.entry_date,
             item_id=body.item_id,
             bag_type_label=body.bag_type_label,
+            std_length_cm=body.std_length_cm,
+            std_width_cm=body.std_width_cm,
             std_bag_weight=body.std_bag_weight,
             std_mr_pct=body.std_mr_pct,
+            above_wt_gm=body.above_wt_gm,
             readings=json.dumps(readings),
             calc_avg_mr=stats["calc_avg_mr"],
             calc_avg_obs_wt=stats["calc_avg_obs_wt"],
@@ -207,6 +250,7 @@ async def create_bag_weight(
             calc_obs_cv_pct=stats["calc_obs_cv_pct"],
             calc_obs_hy_lt_pct=stats["calc_obs_hy_lt_pct"],
             calc_corr_hy_lt_pct=stats["calc_corr_hy_lt_pct"],
+            calc_above_pct=stats["calc_above_pct"],
             updated_by=token_data.get("user_id"),
         )
 
@@ -273,11 +317,16 @@ async def get_bag_weight_by_date(
                     if mr is not None and obs is not None and std_mr_pct is not None
                     else None
                 )
-                readings.append({"mr": mr, "obs": obs, "corr": corr})
+                # Dimensional fields (length/width/ends/picks/stitch/remarks) echo through.
+                readings.append({**rd, "mr": mr, "obs": obs, "corr": corr})
 
             for k in (
+                "std_length_cm",
+                "std_width_cm",
                 "std_bag_weight",
                 "std_mr_pct",
+                "above_wt_gm",
+                "above_pct",
                 "avg_mr",
                 "avg_obs",
                 "avg_corr",

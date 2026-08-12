@@ -144,67 +144,33 @@ def get_winding_daily_query():
       No of Winders per shift (A/B/C/Total), Production per shift (A/B/C/Total),
       and Avg Prod/8 Hrs (= total_prod / total_winders).
 
-    Source: daily_doff_frames_winding rows where spg_wdg='W'.
-      - winders = COUNT(DISTINCT eb_id) per (date, quality, spell)
+    Source: daily_doff_frames_winding rows where spg_wdg='W' and
+    gross_weight > 0 (the production entries; mc_eb_id holds the winder).
+      - winders = COUNT(DISTINCT mc_eb_id) per (date, quality, spell)
       - production = SUM(net_weight)
 
-    Quality display: spinning_type_mst + spinning_quality_mst (same masters
-    used by the spinning report, since the winding rows reference the same
-    quality_id column).
+    Quality display: winding_quality_master via the production row's own
+    quality_id (populated on gross>0 rows; NULL falls into a blank bucket).
     """
     sql = """
         SELECT
-            DATE_FORMAT(g.tran_date, '%d-%m-%Y')               AS report_date,
-            g.quality_id                                       AS quality_id,
-            g.quality_name                                     AS quality_name,
-            sm.spell_id                                        AS spell_id,
-            COALESCE(sm.spell_name, CONCAT('Shift ', g.spell)) AS spell_name,
-            COALESCE(SUM(g.winders), 0)                        AS winders,
-            ROUND(COALESCE(SUM(g.weight), 0), 2)               AS production
-        FROM (
-            SELECT
-                ddfw.tran_date,
-                ddfw.spell,
-                ddfw.quality_id,
-                CONCAT(
-                    COALESCE(stm.spg_type_name, ''), ' ',
-                    COALESCE(sqm.spg_quality, '')
-                )                                    AS quality_name,
-                SUM(ddfw.net_weight)                 AS weight,
-                COUNT(DISTINCT ddfw.eb_id)           AS winders
-            FROM daily_doff_frames_winding ddfw
-            LEFT JOIN spinning_quality_mst sqm
-                   ON sqm.spg_quality_mst_id = ddfw.quality_id
-            LEFT JOIN spinning_type_mst stm
-                   ON stm.spg_type_mst_id = sqm.spg_type_id
-            WHERE ddfw.spg_wdg      = 'W'
-              AND ddfw.gross_weight > 0
-              AND ddfw.tran_date BETWEEN :from_date AND :to_date
-            GROUP BY ddfw.tran_date, ddfw.spell, ddfw.quality_id, quality_name
-        ) g
-        LEFT JOIN spell_mst sm ON sm.spell_id = g.spell
-        GROUP BY g.tran_date, sm.spell_id, sm.spell_name, g.quality_id, g.quality_name
-        ORDER BY g.tran_date, g.quality_name, sm.spell_id
+            DATE_FORMAT(p.tran_date, '%d-%m-%Y')               AS report_date,
+            p.quality_id                                       AS quality_id,
+            wqm.wng_quality                                    AS quality_name,
+            p.spell                                            AS spell_id,
+            COALESCE(sm.spell_name, CONCAT('Shift ', p.spell)) AS spell_name,
+            COUNT(DISTINCT p.mc_eb_id)                         AS winders,
+            ROUND(COALESCE(SUM(p.net_weight), 0), 2)           AS production
+        FROM daily_doff_frames_winding p
+        LEFT JOIN winding_quality_master wqm
+               ON wqm.wng_quality_mst_id = p.quality_id
+        LEFT JOIN spell_mst sm ON sm.spell_id = p.spell
+        WHERE p.spg_wdg       = 'W'
+          AND p.gross_weight  > 0
+          AND p.tran_date BETWEEN :from_date AND :to_date
+        GROUP BY p.tran_date, p.quality_id, wqm.wng_quality, p.spell, sm.spell_name
+        ORDER BY p.tran_date, wqm.wng_quality, p.spell
     """
-    
-    sql="""select  g.tran_date tdate,DATE_FORMAT(g.tran_date, '%d-%m-%Y')AS report_date,
-        ddfw.quality_id quality_id,wqm.wng_quality quality_name,g.spell_id,sm.spell_name,
-        g.cnt winders ,g.weight production
-    from (
-        select mc_eb_id eb_id,ddfw.tran_date,ddfw.spell AS spell_id,sum(ddfw.net_weight) weight,count(*) cnt from daily_doff_frames_winding ddfw
-        where ddfw.spg_wdg ='W' and ddfw.gross_weight >0
-                     AND ddfw.tran_date BETWEEN :from_date AND :to_date
-        group by eb_id,ddfw.tran_date,ddfw.spell
-        ) g
-        left join  daily_doff_frames_winding ddfw
-        on ddfw.tran_date =g.tran_date
-                and ddfw.spell =g.spell_id
-               and ddfw.mc_eb_id =g.eb_id
-               and ddfw.spg_wdg ='W'
-				and COALESCE(ddfw.gross_weight,0 )=0
-        left join winding_quality_master wqm on wqm.wng_quality_mst_id =ddfw.quality_id
-		left join spell_mst sm on sm.spell_id =g.spell_id"""
-        
     return text(sql)
 
 

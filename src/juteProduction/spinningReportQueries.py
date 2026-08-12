@@ -127,7 +127,7 @@ def get_spinning_production_eff_query():
                 )
         ) g
         LEFT JOIN spell_mst sm ON sm.spell_id = g.spell
-        GROUP BY g.doff_date, sm.spell_id, sm.spell_name, g.quality_id, g.quality
+        GROUP BY g.doff_date, g.spell, sm.spell_id, sm.spell_name, g.quality_id, g.quality
         ORDER BY g.doff_date, g.quality, sm.spell_id
     """
     return text(sql)

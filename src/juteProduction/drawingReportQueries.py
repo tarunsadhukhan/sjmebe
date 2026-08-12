@@ -146,7 +146,7 @@ def get_drawing_shift_matrix_query():
             COALESCE(MIN(s.opening_meter), 0) AS op,
             COALESCE(MAX(s.closing_meter), 0) AS cl,
             COALESCE(SUM(s.difference ), 0) AS unit,
-            COALESCE(round(s.difference/m.const_meter*100,2)  , 0) AS eff
+            COALESCE(ROUND(SUM(s.difference) / NULLIF(SUM(s.const_meter), 0) * 100, 2), 0) AS eff
         FROM tbl_daily_drawing s
         left join machine_mst mm on mm.machine_id =s.mc_id 
         LEFT JOIN tbl_drawing_mst m ON m.mc_id = s.mc_id

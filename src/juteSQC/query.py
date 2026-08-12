@@ -2281,8 +2281,11 @@ def get_bag_weight_table_query(search: str = None):
             im.item_name,
             im.item_code,
             bw.bag_type_label,
+            bw.std_length_cm,
+            bw.std_width_cm,
             bw.std_bag_weight,
             bw.std_mr_pct,
+            bw.above_wt_gm,
             bw.calc_avg_mr AS avg_mr,
             bw.calc_avg_obs_wt AS avg_obs,
             bw.calc_avg_corr_wt AS avg_corr,
@@ -2290,6 +2293,7 @@ def get_bag_weight_table_query(search: str = None):
             bw.calc_obs_cv_pct AS obs_cv_pct,
             bw.calc_obs_hy_lt_pct AS obs_hy_lt_pct,
             bw.calc_corr_hy_lt_pct AS corr_hy_lt_pct,
+            bw.calc_above_pct AS above_pct,
             bw.updated_date_time
         FROM jute_sqc_bag_weight bw
         LEFT JOIN item_mst im ON im.item_id = bw.item_id
@@ -2342,8 +2346,11 @@ def get_bag_weight_by_date_query():
             im.item_name,
             im.item_code,
             bw.bag_type_label,
+            bw.std_length_cm,
+            bw.std_width_cm,
             bw.std_bag_weight,
             bw.std_mr_pct,
+            bw.above_wt_gm,
             bw.readings,
             bw.calc_avg_mr AS avg_mr,
             bw.calc_avg_obs_wt AS avg_obs,
@@ -2351,7 +2358,8 @@ def get_bag_weight_by_date_query():
             bw.calc_obs_stdev AS obs_stdev,
             bw.calc_obs_cv_pct AS obs_cv_pct,
             bw.calc_obs_hy_lt_pct AS obs_hy_lt_pct,
-            bw.calc_corr_hy_lt_pct AS corr_hy_lt_pct
+            bw.calc_corr_hy_lt_pct AS corr_hy_lt_pct,
+            bw.calc_above_pct AS above_pct
         FROM jute_sqc_bag_weight bw
         LEFT JOIN item_mst im ON im.item_id = bw.item_id
         WHERE bw.co_id = :co_id
