@@ -399,3 +399,40 @@ class BalesEntryRow(BaseModel):
 
 class BalesEntryResponse(BaseModel):
     data: List[BalesEntryRow]
+
+
+# =============================================================================
+# Assorting Report
+# =============================================================================
+
+
+class AssortingReportParams(BaseModel):
+    """Query params for assorting report endpoints."""
+    branch_id: int = Field(..., gt=0)
+    from_date: date
+    to_date: date
+
+    @model_validator(mode="after")
+    def _check_range(self) -> "AssortingReportParams":
+        if self.from_date > self.to_date:
+            raise ValueError("from_date must be <= to_date")
+        return self
+
+
+class AssortingEntryRow(BaseModel):
+    report_date: str
+    shed_type: Optional[str] = None
+    mc_id: Optional[int] = None
+    mc_name: Optional[str] = None
+    selector_id: Optional[int] = None
+    selector_name: Optional[str] = None
+    quality_id: Optional[int] = None
+    quality_name: Optional[str] = None
+    trolly_no: Optional[str] = None
+    gross_wt: Optional[float] = 0.0
+    tare_wt: Optional[float] = 0.0
+    net_wt: Optional[float] = 0.0
+
+
+class AssortingEntryResponse(BaseModel):
+    data: List[AssortingEntryRow]

@@ -84,6 +84,7 @@ from src.juteProduction.spinningEmpBrkReports import router as spinning_emp_brk_
 from src.juteProduction.windingReports import router as winding_reports_router
 from src.juteProduction.otherReports import router as other_reports_router
 from src.juteProduction.balesReports import router as bales_reports_router
+from src.juteProduction.assortingReports import router as assorting_reports_router
 from src.juteSQC.morrahWeight import router as morrah_wt_router
 from src.juteSQC.spreader_roll_wt import router as spreader_roll_wt_router
 from src.juteSQC.spreader_sliver_wt import router as spreader_sliver_wt_router
@@ -240,6 +241,7 @@ app.include_router(spinning_emp_brk_reports_router, prefix="/api/spinningEmpBrkR
 app.include_router(winding_reports_router, prefix="/api/windingReports", tags=["jute-production-winding-reports"])
 app.include_router(other_reports_router, prefix="/api/otherReports", tags=["jute-production-other-reports"])
 app.include_router(bales_reports_router, prefix="/api/balesReports", tags=["jute-production-bales-reports"])
+app.include_router(assorting_reports_router, prefix="/api/assortingReports", tags=["jute-production-assorting-reports"])
 
 # Jute SQC routers
 app.include_router(morrah_wt_router, prefix="/api/juteSQC", tags=["jute-sqc-morrah-weight"])
