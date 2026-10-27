@@ -108,6 +108,7 @@ from src.juteSQC.packing_mr import router as packing_mr_router
 from src.juteSQC.fabric_fault import router as fabric_fault_router
 from src.juteSQC.emulsion import router as emulsion_router
 from src.juteSQC.humidity import router as humidity_router
+from src.juteSQC.sqc_reports import router as sqc_reports_router
 from src.juteProduction.spng_target_map import router as spng_target_map_router
 from src.juteProduction.beaming_target_map import router as beaming_target_map_router
 from src.juteProduction.finishing_target_map import router as finishing_target_map_router
@@ -267,6 +268,7 @@ app.include_router(packing_mr_router, prefix="/api/juteSQC", tags=["jute-sqc-pac
 app.include_router(fabric_fault_router, prefix="/api/juteSQC", tags=["jute-sqc-fabric-fault"])
 app.include_router(emulsion_router, prefix="/api/juteSQC", tags=["jute-sqc-emulsion"])
 app.include_router(humidity_router, prefix="/api/juteSQC", tags=["jute-sqc-humidity"])
+app.include_router(sqc_reports_router, prefix="/api/juteSQC", tags=["jute-sqc-reports"])
 
 # Jute production target-map routers (used by SQC pages + planning grids)
 app.include_router(spng_target_map_router, prefix="/api/spngTargetMap", tags=["spng-target-map"])
